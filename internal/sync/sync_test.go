@@ -355,10 +355,19 @@ func TestSyncOnceRespectsLimitsAndHoldsUnprobed(t *testing.T) {
 		t.Errorf("got %d pushes for an unprobed entry, want 0", len(pushes))
 	}
 	entries, err := st.Entries()
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("held entry was not kept for next sync: entries=%d (%v)", len(entries), err)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("full catalogue (including entries over the cap) was not retained: entries=%d (%v)", len(entries), err)
 	}
-	if _, _, ok := st.Probe(entries[0].ID); ok {
+	var workedID string
+	for _, e := range entries {
+		if strings.Contains(e.Path, "Alpha") {
+			workedID = e.ID
+		}
+	}
+	if workedID == "" {
+		t.Fatal("the capped work-set entry is missing from the store")
+	}
+	if _, _, ok := st.Probe(workedID); ok {
 		t.Error("failed probe must not be cached")
 	}
 
@@ -633,5 +642,89 @@ func TestItemIDIsStableAcrossSyncs(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(first.ID); err != nil {
 		t.Errorf("item id %q is not hex: %v", first.ID, err)
+	}
+}
+
+// Regression: caps limit the work set, never the catalogue used for Diff.
+// Lowering SYNC_MAX_MOVIES on a populated store must not trip Diff's
+// truncation guard or lose the rows above the cap.
+func TestSyncOnceCapLoweringKeepsFullCatalogue(t *testing.T) {
+	const (
+		total = 30
+		cap   = 10
+	)
+	hrefs := make([]string, 0, total)
+	for i := 1; i <= total; i++ {
+		hrefs = append(hrefs, fmt.Sprintf("/webdav/movies/Movie%02d.Rel/Movie%02d.2020.1080p.mkv", i, i))
+	}
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	dav.setFiles("movies", hrefs...)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	rx := newREX(t, nil)
+	cfg := testConfig(server.URL)
+	cfg.TMDBReadToken = "" // no credential: enrichment is skipped, no network
+
+	// Seed a populated store with the 30 enumerated entries and no probe
+	// cache, as if a previous run had catalogued them but only pushed a
+	// subset. This is the state that made every later sync fail before the
+	// fix: the capped listing looked like a >50% catalogue shrinkage.
+	seed := altmount.NewClient(server.URL+"/webdav/", davUser, davPass, nil)
+	seeded, err := seed.List(context.Background(), "movies")
+	if err != nil || len(seeded) != total {
+		t.Fatalf("seed listing: %d entries, %v; want %d", len(seeded), err, total)
+	}
+	if err := st.UpsertEntries(seeded); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	findID := func(name string) string {
+		t.Helper()
+		for _, e := range seeded {
+			if strings.Contains(e.Path, name) {
+				return e.ID
+			}
+		}
+		t.Fatalf("%s not found in seeded catalogue", name)
+		return ""
+	}
+	underCap, overCap := findID("Movie01"), findID("Movie11")
+
+	// With SYNC_MAX_MOVIES=10, Diff must see all 30 entries: no error, all
+	// rows retained, exactly 10 items worked on and probed.
+	cfg.SyncMaxMovies = cap
+	svc := newService(t, cfg, st, server.URL, rx, goodProbe)
+	stats, err := svc.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SyncOnce with lowered cap: %v (the full catalogue must stay in Diff)", err)
+	}
+	if stats.Scanned != total || stats.Pushed != cap || stats.Probed != cap {
+		t.Errorf("stats = %+v, want Scanned=%d Pushed=%d Probed=%d", stats, total, cap, cap)
+	}
+	if _, _, pushes, _ := rx.snapshot(); fmt.Sprint(pushSizes(pushes)) != "[10]" {
+		t.Errorf("pushes = %v, want [10]", pushSizes(pushes))
+	}
+	entries, err := st.Entries()
+	if err != nil || len(entries) != total {
+		t.Errorf("store has %d entries (%v) after capping, want %d", len(entries), err, total)
+	}
+	if _, _, ok := st.Probe(underCap); !ok {
+		t.Error("entry under the cap was not probed")
+	}
+	if _, _, ok := st.Probe(overCap); ok {
+		t.Error("an entry above the cap must stay unprobed")
+	}
+
+	// Raising the cap again picks up the skipped entries without re-probing
+	// the already-cached ones.
+	rx.clearPushes()
+	cfg.SyncMaxMovies = 0
+	svc = newService(t, cfg, st, server.URL, rx, goodProbe)
+	stats, err = svc.SyncOnce(context.Background())
+	if err != nil || stats.Pushed != total || stats.Probed != total-cap {
+		t.Errorf("raised cap: stats=%+v err=%v; want Pushed=%d Probed=%d", stats, err, total, total-cap)
+	}
+	if _, _, ok := st.Probe(overCap); !ok {
+		t.Error("entry above the cap was not picked up when the cap was lifted")
 	}
 }

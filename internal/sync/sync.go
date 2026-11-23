@@ -106,9 +106,10 @@ func NewProbeFunc(cfg config.Config, h *http.Client) ProbeFunc {
 	}
 }
 
-// SyncOnce enumerates both categories, applies the configured caps, diffs the
-// catalogue, enriches and probes entries, maps them to REX items and pushes
-// them in batches. Entries with no valid probe, and items REX holds or
+// SyncOnce enumerates both categories, diffs and persists the full catalogue,
+// then applies the configured caps to the work set that is enriched, probed
+// and pushed in batches. Entries above the cap stay stored and unprobed until
+// the cap is raised. Entries with no valid probe, and items REX holds or
 // rejects, remain in the store for the next pass. Removals never call
 // rex.Delete in v1: stale REX rows are left for manual cleanup.
 func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
@@ -130,24 +131,32 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 	}
 	stats.Scanned = len(movies) + len(shows)
 
-	movies = limitEntries(movies, s.cfg.SyncMaxMovies)
-	shows = limitEntries(shows, s.cfg.SyncMaxSeries)
-	next := make([]models.Entry, 0, len(movies)+len(shows))
-	next = append(next, movies...)
-	next = append(next, shows...)
 	// The enumerator leaves season/episode at zero; the release-name parser
 	// fills them before the diff so a stable id is not seen as "changed" on
-	// every later sync.
-	for i := range next {
-		_, _, season, episode := tmdb.ParseRelease(next[i].File, next[i].Category)
-		next[i].Season, next[i].Episode = season, episode
+	// every later sync. Parse both slices before copying them into the full
+	// catalogue and the capped work set so the two stay in sync.
+	for i := range movies {
+		_, _, season, episode := tmdb.ParseRelease(movies[i].File, movies[i].Category)
+		movies[i].Season, movies[i].Episode = season, episode
 	}
+	for i := range shows {
+		_, _, season, episode := tmdb.ParseRelease(shows[i].File, shows[i].Category)
+		shows[i].Season, shows[i].Episode = season, episode
+	}
+
+	// Diff and persist the UNCAPPED catalogue. Applying SYNC_MAX_* before
+	// Diff makes a capped listing look like genuine catalogue shrinkage once
+	// the store is populated: Diff's >50% removal guard would refuse every
+	// later sync. Caps limit only the work set below.
+	full := make([]models.Entry, 0, len(movies)+len(shows))
+	full = append(full, movies...)
+	full = append(full, shows...)
 
 	old, err := s.db.Entries()
 	if err != nil {
 		return stats, fmt.Errorf("sync: read catalogue: %w", err)
 	}
-	added, _, removed, err := altmount.Diff(old, next)
+	added, _, removed, err := altmount.Diff(old, full)
 	if err != nil {
 		return stats, fmt.Errorf("sync: diff catalogue: %w", err)
 	}
@@ -155,12 +164,12 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 
 	// Persist the catalogue before probing: a held entry must still be known
 	// on the next pass so it is retried rather than treated as a new file.
-	if err := s.db.UpsertEntries(next); err != nil {
+	if err := s.db.UpsertEntries(full); err != nil {
 		return stats, fmt.Errorf("sync: upsert entries: %w", err)
 	}
 	if len(removed) > 0 {
-		ids := make([]string, 0, len(next))
-		for _, e := range next {
+		ids := make([]string, 0, len(full))
+		for _, e := range full {
 			ids = append(ids, e.ID)
 		}
 		if _, err := s.db.RemoveEntriesNotIn(ids); err != nil {
@@ -168,18 +177,25 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 		}
 	}
 
+	// Caps apply only to the entries enriched, probed and pushed this pass.
+	// Everything above the cap stays in the store, unprobed, and is picked up
+	// when the cap is raised or removed.
+	work := make([]models.Entry, 0, len(full))
+	work = append(work, limitEntries(movies, s.cfg.SyncMaxMovies)...)
+	work = append(work, limitEntries(shows, s.cfg.SyncMaxSeries)...)
+
 	// TMDB lookups are cached in SQLite by the client; a failed or ambiguous
 	// match yields empty metadata but must not stop the push.
-	enriched := make([]models.Enriched, len(next))
-	for i, e := range next {
+	enriched := make([]models.Enriched, len(work))
+	for i, e := range work {
 		enriched[i] = s.enrich(ctx, e)
 	}
 
-	results := make([]probe.Result, len(next))
-	valid := make([]bool, len(next))
-	fresh := make([]bool, len(next))
-	misses := make([]int, 0, len(next))
-	for i, e := range next {
+	results := make([]probe.Result, len(work))
+	valid := make([]bool, len(work))
+	fresh := make([]bool, len(work))
+	misses := make([]int, 0, len(work))
+	for i, e := range work {
 		body, digest, ok := s.db.Probe(e.ID)
 		if ok && len(body) > 0 {
 			results[i] = probe.Result{JSON: json.RawMessage(body), Digest: digest}
@@ -188,14 +204,14 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 		}
 		misses = append(misses, i)
 	}
-	s.probeMissing(ctx, next, misses, results, valid, fresh)
+	s.probeMissing(ctx, work, misses, results, valid, fresh)
 	stats.Probed = len(misses)
 	// A probe is cached only after validation has accepted it.
 	for _, i := range misses {
 		if !valid[i] {
 			continue
 		}
-		if err := s.db.SetProbe(next[i].ID, string(results[i].JSON), results[i].Digest); err != nil {
+		if err := s.db.SetProbe(work[i].ID, string(results[i].JSON), results[i].Digest); err != nil {
 			return stats, fmt.Errorf("sync: cache probe: %w", err)
 		}
 	}
@@ -204,8 +220,8 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 	probeDigest := s.features.ProbeDigest
 	s.regMu.Unlock()
 
-	items := make([]rex.Item, 0, len(next))
-	for i, e := range next {
+	items := make([]rex.Item, 0, len(work))
+	for i, e := range work {
 		if !valid[i] {
 			stats.Held++
 			continue
