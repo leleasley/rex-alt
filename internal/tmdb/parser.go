@@ -30,7 +30,8 @@ var videoExtensions = map[string]bool{
 // resolution, source, codec, audio format and upload-group markers.
 var junkTokens = map[string]bool{
 	"4k": true, "uhd": true, "hdr": true, "hdr10": true, "10bit": true, "8bit": true,
-	"bluray": true, "blu": true, "ray": true, "web": true, "webdl": true,
+	"bluray": true, "blueray": true, "blu-ray": true, "blu": true, "ray": true,
+	"web": true, "webdl": true,
 	"webrip": true, "web-dl": true, "hdtv": true, "dvdrip": true, "bdrip": true,
 	"remux": true, "x264": true, "x265": true, "h264": true, "h265": true,
 	"hevc": true, "av1": true, "xvid": true, "divx": true, "aac": true,

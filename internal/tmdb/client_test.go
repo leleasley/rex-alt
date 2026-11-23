@@ -410,7 +410,7 @@ func TestEnrichShowEpisode(t *testing.T) {
 	if want := "https://image.tmdb.org/t/p/w780/showbackdrop.jpg"; en.ShowBackdrop != want {
 		t.Errorf("show backdrop = %q, want %q", en.ShowBackdrop, want)
 	}
-	if want := "https://image.tmdb.org/t/p/w500/still.jpg"; en.Poster != want {
+	if want := "https://image.tmdb.org/t/p/w300/still.jpg"; en.Poster != want {
 		t.Errorf("episode still = %q, want %q", en.Poster, want)
 	}
 	if en.IMDbID != "" {

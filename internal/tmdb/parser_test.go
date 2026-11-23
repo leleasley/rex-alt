@@ -35,6 +35,18 @@ func TestParseReleaseMovie(t *testing.T) {
 			wantTitle: "Movie Title",
 			wantYear:  2022,
 		},
+		{
+			name:      "Swallowed.2022.1080p.Blueray.x264-DST",
+			category:  "movies",
+			wantTitle: "Swallowed",
+			wantYear:  2022,
+		},
+		{
+			name:      "Movie.Title.2022.1080p.Blu-Ray.x264-DST",
+			category:  "movies",
+			wantTitle: "Movie Title",
+			wantYear:  2022,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

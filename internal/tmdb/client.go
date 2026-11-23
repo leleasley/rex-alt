@@ -24,7 +24,7 @@ const (
 	posterSize       = "w500"
 	showPosterSize   = "w300"
 	backdropSize     = "w780"
-	stillSize        = "w500"
+	stillSize        = "w300" // still_sizes in /3/configuration: w92, w300, original
 	maxRetries       = 3
 	maxResponseBytes = 1 << 20
 	defaultTimeout   = 15 * time.Second
