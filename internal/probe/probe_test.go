@@ -65,8 +65,12 @@ func basicAuth(user, pass string) string {
 func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 	script := fakeFFProbe(t)
 	capture := captureArgs(t)
+	headerFile := filepath.Join(t.TempDir(), "headers.bin")
+	t.Setenv("FFPROBE_HEADER_CAPTURE", headerFile)
 	t.Setenv("FFPROBE_MODE", "json")
 	sourceURL := "http://127.0.0.1:8090/webdav/movie.mkv"
+	wantAuth := basicAuth(testUser, testPass)
+	wantHeaders := wantAuth + "\r\nRange: bytes=0-\r\n"
 
 	res, err := Probe(context.Background(), sourceURL, testUser, testPass, script, 45*time.Second, 45_000_000)
 	if err != nil {
@@ -81,7 +85,7 @@ func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 		"-headers",
 	}
 	if len(args) != len(wantPrefix)+2 {
-		t.Fatalf("got %d ffprobe args, want %d: %q", len(args), len(wantPrefix)+2, args)
+		t.Fatalf("got %d ffprobe args, want %d (argv not printed: carries the auth token)", len(args), len(wantPrefix)+2)
 	}
 	if !reflect.DeepEqual(args[:len(wantPrefix)], wantPrefix) {
 		t.Errorf("ffprobe flags = %q, want %q", args[:len(wantPrefix)], wantPrefix)
@@ -90,14 +94,30 @@ func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 	if got := args[len(args)-1]; got != sourceURL {
 		t.Errorf("URL argument = %q, want %q", got, sourceURL)
 	}
-	if !strings.Contains(headers, basicAuth(testUser, testPass)) {
-		t.Errorf("headers %q missing Basic auth", headers)
+
+	// The fake writes the -headers argument verbatim. Assert the exact
+	// CRLF-terminated lines: ffprobe splits on CRLF, so a missing terminator
+	// after the Authorization line merges it into the Range line (401 + full
+	// body). Failure messages never print the token.
+	rawHeaders, err := os.ReadFile(headerFile)
+	if err != nil {
+		t.Fatalf("read raw headers: %v", err)
+	}
+	if string(rawHeaders) != wantHeaders {
+		t.Errorf("ffprobe -headers value is not two CRLF-terminated lines (got %d bytes, want %d)", len(rawHeaders), len(wantHeaders))
+	}
+	lines := strings.Split(string(rawHeaders), "\r\n")
+	if len(lines) != 3 || lines[0] != wantAuth || lines[1] != "Range: bytes=0-" || lines[2] != "" {
+		t.Errorf("ffprobe -headers lines are malformed: got %d CRLF-separated parts, want Authorization / Range / empty", len(lines))
+	}
+	if !strings.Contains(headers, wantAuth) {
+		t.Errorf("captured headers missing the Basic auth line")
 	}
 	if !strings.Contains(headers, "Range: bytes=0-") {
-		t.Errorf("headers %q missing Range request", headers)
+		t.Errorf("captured headers missing the Range line")
 	}
 	if strings.Contains(headers, testPass) || strings.Contains(headers, testUser+":"+testPass) {
-		t.Errorf("headers contain plaintext credentials: %q", headers)
+		t.Errorf("captured headers contain plaintext credentials")
 	}
 	if len(res.JSON) == 0 || res.Digest == "" {
 		t.Fatalf("empty result: %+v", res)
@@ -250,9 +270,9 @@ func TestProbeSanitizesCredentialedURLs(t *testing.T) {
 		t.Fatalf("Probe: %v", err)
 	}
 	body := string(res.JSON)
-	for _, secret := range []string{"alice", "s3cr3t", "token=abc123", "@", sourceURL} {
+	for i, secret := range []string{"alice", "s3cr3t", "token=abc123", "@", sourceURL} {
 		if strings.Contains(body, secret) {
-			t.Errorf("sanitized JSON still contains %q: %s", secret, body)
+			t.Errorf("sanitized JSON leaked fixture secret #%d (value not printed)", i)
 		}
 	}
 	var doc struct {
@@ -301,9 +321,9 @@ func TestProbeErrorsNeverLeakCredentials(t *testing.T) {
 		t.Fatal("expected ffprobe failure")
 	}
 	message := err.Error()
-	for _, secret := range []string{"alice", "s3cr3t", "token=abc123", testUser, testPass, secretHeader, sourceURL} {
+	for i, secret := range []string{"alice", "s3cr3t", "token=abc123", testUser, testPass, secretHeader, sourceURL} {
 		if strings.Contains(message, secret) {
-			t.Errorf("error leaked %q: %s", secret, message)
+			t.Errorf("error leaked fixture secret #%d (value not printed)", i)
 		}
 	}
 }
@@ -311,9 +331,9 @@ func TestProbeErrorsNeverLeakCredentials(t *testing.T) {
 func TestScrubStringHandlesAnyCredentialedScheme(t *testing.T) {
 	input := `source dav://user:pass@host/path?token=abc and http://u:p@example.com/f.json`
 	got := scrubString(input, "")
-	for _, secret := range []string{"user:pass", "token=abc", "u:p@", "pass@host"} {
+	for i, secret := range []string{"user:pass", "token=abc", "u:p@", "pass@host"} {
 		if strings.Contains(got, secret) {
-			t.Errorf("scrubbed text %q still contains %q", got, secret)
+			t.Errorf("scrubbed text leaked fixture secret #%d (value not printed)", i)
 		}
 	}
 	if !strings.Contains(got, "dav://host/path") || !strings.Contains(got, "http://example.com/f.json") {

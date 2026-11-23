@@ -135,7 +135,10 @@ func runFFProbe(ctx context.Context, path string, rwTimeoutMicros int, headers, 
 
 func basicHeader(user, pass string) string {
 	token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
-	return "Authorization: Basic " + token
+	// ffprobe splits -headers on CRLF. Without the terminator the next header
+	// is concatenated onto this line, yielding a garbage auth token and no
+	// Range header (which would allow a full-body response).
+	return "Authorization: Basic " + token + "\r\n"
 }
 
 func elapsedNearDeadline(start time.Time, timeout time.Duration) bool {

@@ -25,6 +25,19 @@ if [ -n "$capture" ]; then
 	printf '%s\n' '--END--' >>"$capture"
 fi
 
+# Captures the -headers argument verbatim (CRLF included) so tests can assert
+# the exact wire-format header lines instead of merely checking substrings.
+header_capture=${FFPROBE_HEADER_CAPTURE:-}
+if [ -n "$header_capture" ]; then
+	previous=''
+	for arg do
+		if [ "$previous" = '-headers' ]; then
+			printf '%s' "$arg" >"$header_capture"
+		fi
+		previous=$arg
+	done
+fi
+
 last=''
 for arg do
 	last=$arg
