@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Realistic Altmount WebDAV PROPFIND response. The share is mounted under
+     /webdav/; this fixture is a Depth: 2 listing of /webdav/movies/. -->
+<d:multistatus xmlns:d="DAV:" xmlns:lp1="http://apache.org/dav/props/">
+  <d:response>
+    <d:href>/webdav/movies/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype>
+        <d:getetag>&quot;&quot;</d:getetag>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype>
+        <d:getetag>&quot;&quot;</d:getetag>
+        <d:getlastmodified>Mon, 23 Nov 2026 10:10:00 GMT</d:getlastmodified>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/file.mkv</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype/>
+        <d:getcontentlength>123456789</d:getcontentlength>
+        <d:getlastmodified>Mon, 23 Nov 2026 10:11:12 GMT</d:getlastmodified>
+        <d:getetag>&quot;5aa1-1&quot;</d:getetag>
+        <lp1:getcontenttype>video/x-matroska</lp1:getcontenttype>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/second.mp4</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype/>
+        <d:getcontentlength>98765432</d:getcontentlength>
+        <d:getlastmodified>Mon, 23 Nov 2026 10:12:30 GMT</d:getlastmodified>
+        <d:getetag>&quot;5aa2-2&quot;</d:getetag>
+        <lp1:getcontenttype>video/mp4</lp1:getcontenttype>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/sample.mkv</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype/>
+        <d:getcontentlength>1048576</d:getcontentlength>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/file.mkv.srt</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype/><d:getcontentlength>51200</d:getcontentlength></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/file.nfo</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype/><d:getcontentlength>1024</d:getcontentlength></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/subs/</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/subs/English.srt</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype/><d:getcontentlength>48000</d:getcontentlength></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
