@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/
+/rex-alt
+bin/
+dist/
+coverage.out
+.DS_Store
