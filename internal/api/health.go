@@ -16,11 +16,23 @@ var Version = "dev"
 // satisfying http.Handler everywhere it is registered.
 func HealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "ok",
 			"version": Version,
 		})
 	}
+}
+
+// writeJSON is the single JSON response writer for every admin route, so a
+// successful body and an error body can never differ in content type.
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// writeJSONError emits a fixed, secret-free message. Callers must never pass
+// request data or configuration values as message.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]any{"error": message})
 }
