@@ -1,0 +1,12 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 777,
+      "title": "A Completely Different Film",
+      "release_date": "2022-02-02"
+    }
+  ],
+  "total_results": 1,
+  "total_pages": 1
+}

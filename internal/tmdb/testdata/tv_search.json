@@ -1,0 +1,15 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 555,
+      "name": "Something Very Bad Is Going to Happen",
+      "first_air_date": "2025-01-01",
+      "overview": "A very bad show.",
+      "poster_path": "/showposter.jpg",
+      "backdrop_path": "/showbackdrop.jpg"
+    }
+  ],
+  "total_results": 1,
+  "total_pages": 1
+}

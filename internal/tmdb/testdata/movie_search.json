@@ -1,0 +1,20 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 12345,
+      "title": "Swallowed",
+      "release_date": "2022-03-11",
+      "overview": "A swallowed movie summary.",
+      "poster_path": "/poster.jpg",
+      "backdrop_path": "/backdrop.jpg"
+    },
+    {
+      "id": 999,
+      "title": "Unrelated Film",
+      "release_date": "2022-05-01"
+    }
+  ],
+  "total_results": 2,
+  "total_pages": 1
+}
