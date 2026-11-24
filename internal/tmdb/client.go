@@ -35,6 +35,10 @@ const (
 	// Conservative Dice threshold. Residual release junk lowers a genuine
 	// match to roughly 0.7; unrelated films score far below this.
 	minTitleScore = 0.6
+	// A title whose every token occurs in the parsed query is this strong a
+	// match. It stays below the 1.0 of an exact normalised match so exact
+	// titles still win ties, but clears minTitleScore on its own.
+	containedTitleScore = 0.95
 )
 
 // scoringApostrophes is used only by the match scorer: TMDB writes "Patch's"
@@ -266,7 +270,9 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 // out-of-range year is skipped before scoring, so a wrong-year lookalike can
 // never displace the right film or trigger a wrong-id attach. Higher scores
 // win; ties keep the higher-ranked result, except that an exact normalised
-// title match (score 1.0) wins a tie as required.
+// title match (score 1.0) wins a tie as required. A candidate whose tokens are
+// all contained in the parsed title scores containedTitleScore, which recovers
+// releases with trailing codec/group junk that Dice alone would reject.
 func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle string, wantYear int) int {
 	limit := len(results)
 	if limit > maxSearchResults {
@@ -281,6 +287,9 @@ func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle 
 		}
 		hitTitle := titleOf(hit)
 		score := titleScore(wantTitle, hitTitle)
+		if contained := containmentScore(wantTitle, hitTitle); contained > score {
+			score = contained
+		}
 		isExact := normalizeTitle(hitTitle) == exact
 		if score > bestScore || (score == bestScore && isExact && !bestExact) {
 			best, bestScore, bestExact = i, score, isExact
@@ -315,6 +324,32 @@ func titleScore(want, got string) float64 {
 		}
 	}
 	return float64(2*shared) / float64(len(a)+len(b))
+}
+
+// containmentScore scores a TMDB title highly when every one of its tokens is
+// also a token of the parsed query and it has at least two tokens. Parsed
+// release names often end in codec/group junk ("Train Dreams H 265-XEBEC"),
+// which dilutes the Dice overlap with the real title below minTitleScore;
+// containment recognises the real title as a subset without a junk-token list.
+// A candidate with any extra token is never contained, so extended or
+// unrelated titles cannot be mistaken for the parsed one. The score stays
+// below 1.0 so an exact normalised match still wins a tie.
+func containmentScore(want, got string) float64 {
+	wantTokens, gotTokens := titleTokens(want), titleTokens(got)
+	if len(wantTokens) == 0 || len(gotTokens) < 2 {
+		return 0
+	}
+	counts := make(map[string]int, len(wantTokens))
+	for _, token := range wantTokens {
+		counts[token]++
+	}
+	for _, token := range gotTokens {
+		if counts[token] == 0 {
+			return 0
+		}
+		counts[token]--
+	}
+	return containedTitleScore
 }
 
 // titleTokens is the scoring-only normalisation: apostrophes are deleted

@@ -1,8 +1,6 @@
 package rex
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -53,8 +51,7 @@ func TestMovieItemTMDBFlag(t *testing.T) {
 	if on.Size != 1234 {
 		t.Errorf("size = %d, want 1234", on.Size)
 	}
-	sum := sha256.Sum256([]byte("movies|Rel|file.mkv"))
-	if want := hex.EncodeToString(sum[:])[:24]; on.ID != want {
+	if want := "movies/Rel/file.mkv"; on.ID != want {
 		t.Errorf("id = %q, want %q", on.ID, want)
 	}
 	if on.Path != "movies/Rel/file.mkv" {

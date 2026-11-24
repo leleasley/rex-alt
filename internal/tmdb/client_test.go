@@ -423,6 +423,98 @@ func TestEnrichResolvesNoisyMovieTitles(t *testing.T) {
 	}
 }
 
+// A parsed release can end in codec/group tokens ("H.265-XEBEC"): the real
+// TMDB title is then a strict subset of the query tokens and Dice alone falls
+// below 0.6. Containment must recover the exact film even with decoys ahead of
+// it, without fetching details for any decoy.
+func TestEnrichResolvesTitleWithTrailingCodecTokens(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "movie_search_train_dreams.json")
+	const wantID = 1241983
+	const wantDetails = "/3/movie/1241983"
+	detailsBody := `{"id":1241983,"imdb_id":"tt1241983","title":"Train Dreams",` +
+		`"release_date":"2025-11-21","overview":"A logger's life in the American West.",` +
+		`"poster_path":"/train-dreams-poster.jpg","backdrop_path":"/train-dreams-backdrop.jpg"}`
+
+	var mu sync.Mutex
+	var detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		case wantDetails:
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, detailsBody)
+		default:
+			// Any details fetch for a decoy id is a wrong-id attach.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Train Dreams H 265-XEBEC", 2025, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false for a title with trailing codec tokens")
+	}
+	if en.TMDBID != wantID {
+		t.Errorf("TMDBID = %d, want %d", en.TMDBID, wantID)
+	}
+	if en.Title != "Train Dreams" || en.Date != "2025-11-21" {
+		t.Errorf("metadata = %+v", en)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+		t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+	}
+}
+
+// Containment must not widen the wrong-id guard: a candidate with extra tokens
+// that are absent from the parsed query is still rejected, even when its other
+// tokens and year line up.
+func TestEnrichRejectsExtendedTitleCandidate(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "movie_search_train_dreams_extended.json")
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Train Dreams H 265-XEBEC", 2025, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched for an extended title", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for a candidate with extra tokens")
+	}
+}
+
 // Pin the wrong-id guard: an unrelated top hit and a low-scoring follower must
 // never produce an id or a details request, even when years line up.
 func TestEnrichRejectsUnrelatedTopHit(t *testing.T) {
@@ -528,6 +620,16 @@ func TestBestHitIndexGuardsAndTieBreaks(t *testing.T) {
 			name:    "no year requested accepts a missing date",
 			results: []hit{{title: "A Wounded Fawn", date: ""}},
 			want:    "A Wounded Fawn", year: 0, index: 0,
+		},
+		{
+			name:    "contained title outranks an extended decoy",
+			results: []hit{{title: "Train Dreams Revisited", date: "2025-06-01"}, {title: "Train Dreams", date: "2025-11-21"}},
+			want:    "Train Dreams H 265-XEBEC", year: 2025, index: 1,
+		},
+		{
+			name:    "candidate with extra tokens is not contained",
+			results: []hit{{title: "Train Dreams Revisited", date: "2025-11-21"}},
+			want:    "Train Dreams H 265-XEBEC", year: 2025, index: -1,
 		},
 	}
 	for _, tc := range cases {

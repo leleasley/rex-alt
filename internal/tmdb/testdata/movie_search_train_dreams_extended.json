@@ -1,0 +1,22 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 9901,
+      "title": "Train Dreams Revisited",
+      "release_date": "2025-11-21"
+    },
+    {
+      "id": 9902,
+      "title": "Train Dreamers",
+      "release_date": "2025-11-21"
+    },
+    {
+      "id": 9903,
+      "title": "A Completely Different Film",
+      "release_date": "2025-11-21"
+    }
+  ],
+  "total_results": 3,
+  "total_pages": 1
+}

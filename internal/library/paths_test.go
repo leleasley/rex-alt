@@ -1,22 +1,29 @@
 package library
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"testing"
 
 	"github.com/leleasley/rex-alt/internal/models"
 )
 
-func TestItemIDStableAndPathIsWebDAVRelative(t *testing.T) {
+func TestItemIDEqualsWebDAVRelativePath(t *testing.T) {
 	e := models.Entry{Category: "movies", Release: "Rel", File: "file.mkv"}
-	sum := sha256.Sum256([]byte("movies|Rel|file.mkv"))
-	wantID := hex.EncodeToString(sum[:])[:24]
-	if got := ItemID(e); got != wantID {
-		t.Errorf("ItemID = %q, want %q", got, wantID)
+	want := "movies/Rel/file.mkv"
+	if got := ItemID(e); got != want {
+		t.Errorf("ItemID = %q, want %q", got, want)
 	}
-	if got := ItemPath(e); got != "movies/Rel/file.mkv" {
-		t.Errorf("ItemPath = %q, want %q", got, "movies/Rel/file.mkv")
+	if got := ItemPath(e); got != want {
+		t.Errorf("ItemPath = %q, want %q", got, want)
+	}
+}
+
+func TestItemIDIsReadableForRealReleaseNames(t *testing.T) {
+	release := "Train.Dreams.2025.REPACK.2160p.NF.WEB-DL.DDP5.1.Atmos.H.265-XEBEC"
+	file := release + ".mkv"
+	e := models.Entry{Category: "movies", Release: release, File: file}
+	want := "movies/" + release + "/" + file
+	if got := ItemID(e); got != want {
+		t.Errorf("ItemID = %q, want the readable path %q", got, want)
 	}
 }
 
@@ -33,5 +40,13 @@ func TestItemIDChangesWithAnyPathPart(t *testing.T) {
 				t.Errorf("ItemID = %q, unchanged after %s change", got, name)
 			}
 		})
+	}
+}
+
+func TestItemIDDistinguishesFilesInSameRelease(t *testing.T) {
+	a := models.Entry{Category: "movies", Release: "Rel", File: "first.mkv"}
+	b := models.Entry{Category: "movies", Release: "Rel", File: "second.mkv"}
+	if ItemID(a) == ItemID(b) {
+		t.Errorf("different files share id %q", ItemID(a))
 	}
 }

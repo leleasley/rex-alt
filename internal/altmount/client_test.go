@@ -2,8 +2,6 @@ package altmount
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,10 +31,10 @@ func davFixture(t *testing.T) []byte {
 	return body
 }
 
-// wantID computes the expected id independently of library.ItemID.
+// wantID computes the expected id independently of library.ItemID: ids are
+// the readable WebDAV-relative path.
 func wantID(e models.Entry) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{e.Category, e.Release, e.File}, "|")))
-	return hex.EncodeToString(sum[:])[:24]
+	return strings.Join([]string{e.Category, e.Release, e.File}, "/")
 }
 
 func TestListParsesPROPFIND207(t *testing.T) {

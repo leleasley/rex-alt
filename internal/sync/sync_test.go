@@ -2,7 +2,6 @@ package sync
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -693,11 +692,8 @@ func TestItemIDIsStableAcrossSyncs(t *testing.T) {
 	if first.ID != second.ID || first.ID == "" {
 		t.Errorf("item ids %q and %q are not stable", first.ID, second.ID)
 	}
-	if len(first.ID) != 24 {
-		t.Errorf("item id %q has length %d, want 24", first.ID, len(first.ID))
-	}
-	if _, err := hex.DecodeString(first.ID); err != nil {
-		t.Errorf("item id %q is not hex: %v", first.ID, err)
+	if first.ID != first.Path {
+		t.Errorf("item id %q is not the readable WebDAV path %q", first.ID, first.Path)
 	}
 }
 

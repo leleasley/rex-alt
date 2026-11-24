@@ -1,26 +1,20 @@
 package library
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 
 	"github.com/leleasley/rex-alt/internal/models"
 )
 
-const (
-	pathSeparator = "/"
-	idSeparator   = "|"
-	idHexLength   = 24
-)
+const pathSeparator = "/"
 
-// ItemID is the stable per-source key REX binds watch history to. It hashes
-// the three WebDAV path segments so a file keeps its id across re-enumerations
-// and so two releases with the same filename do not collide.
+// ItemID is the stable per-source key REX binds watch history to. It is the
+// WebDAV-relative path: unique per source file, permanent across re-enumerations,
+// URL-safe once REX percent-encodes path segments, and readable in the feed.
+// The release directory is part of the path, so two releases with the same
+// filename still get different ids.
 func ItemID(e models.Entry) string {
-	key := strings.Join([]string{e.Category, e.Release, e.File}, idSeparator)
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:idHexLength]
+	return ItemPath(e)
 }
 
 // ItemPath is the file's path relative to the registered WebDAV base, e.g.
