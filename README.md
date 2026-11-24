@@ -14,6 +14,8 @@ It is deliberately additive: **Zurg stays untouched and remains a REX source.** 
 - A publisher of two new libraries: **Altmount Movies** (directory `movies`) and **Altmount TV** (directory `tv`).
 - A metadata-only bridge: WebDAV `PROPFIND` for enumeration, TMDB for display metadata, `ffprobe` over HTTP Range for `media_info`, and the REX source/feed API for delivery.
 
+> The source registers with REX using mount `/altmount`, so its libraries live at `/altmount/movies` and `/altmount/tv`, separate from Zurg's libraries under REX's default `/mnt/rex`. The item paths pushed to the feed stay `movies/...` and `tv/...`.
+
 **It is not:**
 
 - **Not a replacement for Zurg.** Zurg continues to feed REX exactly as before; this is a second source alongside it.

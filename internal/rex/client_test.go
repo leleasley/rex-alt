@@ -41,6 +41,7 @@ func TestRegisterSendsCredentialsOutsideURL(t *testing.T) {
 			URL         string      `json:"url"`
 			User        string      `json:"user"`
 			Password    string      `json:"password"`
+			Mount       string      `json:"mount"`
 			Trash       *bool       `json:"trash"`
 			Directories []Directory `json:"directories"`
 		}
@@ -57,6 +58,9 @@ func TestRegisterSendsCredentialsOutsideURL(t *testing.T) {
 		}
 		if body.User != testUser || body.Password != testPass {
 			t.Errorf("credentials in wrong fields: user=%q password=%q", body.User, body.Password)
+		}
+		if body.Mount != "/altmount" {
+			t.Errorf("mount = %q, want /altmount", body.Mount)
 		}
 		if body.Trash == nil || *body.Trash {
 			t.Errorf("trash = %v, want false", body.Trash)

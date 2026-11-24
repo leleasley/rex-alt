@@ -116,7 +116,9 @@ func (c *Client) Healthy(ctx context.Context) error {
 
 // Register registers (or re-registers) this source with REX. publicURL is the
 // address REX will fetch bytes from; its credentials are sent separately in
-// user/password. The returned Features describe what this REX supports.
+// user/password. The explicit /altmount mount keeps REX's libraries for this
+// source on /altmount/<directory>, apart from Zurg's default /mnt/rex ones.
+// The returned Features describe what this REX supports.
 func (c *Client) Register(ctx context.Context, publicURL string, dirs []Directory) (Features, error) {
 	if err := checkPublicURL(publicURL); err != nil {
 		return Features{}, err
@@ -125,6 +127,7 @@ func (c *Client) Register(ctx context.Context, publicURL string, dirs []Director
 		"url":         strings.TrimRight(publicURL, "/"),
 		"user":        c.user,
 		"password":    c.pass,
+		"mount":       "/altmount",
 		"trash":       false,
 		"directories": dirs,
 	}
