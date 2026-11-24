@@ -1,6 +1,7 @@
 // Package probe turns Altmount WebDAV file URLs into the ffprobe metadata REX
-// requires. It only asks ffprobe for the bytes needed to probe (HTTP Range via
-// the -rw_timeout/-headers options); it never downloads, stores or proxies
+// requires. It bounds how much ffprobe reads with -probesize/-analyzeduration
+// rather than forcing an HTTP Range header (Altmount truncates forced ranges,
+// which made containers fail to parse); it never downloads, stores or proxies
 // media bytes. Credentials are passed in ffprobe's -headers option and are
 // scrubbed from every URL-like value and every error before a Result escapes.
 package probe
@@ -42,8 +43,9 @@ type Result struct {
 
 // Probe runs ffprobe against a WebDAV file URL once, retrying once only when
 // the attempt times out (a cold/slow first byte). Invalid data is returned
-// immediately and is never mistaken for a timeout. Basic auth is supplied via
-// ffprobe's -headers option, never in the URL or in a logged command line.
+// immediately and is never mistaken for a timeout. Basic auth is the only
+// entry in ffprobe's -headers option, never in the URL or in a logged command
+// line; probing is bounded by -probesize/-analyzeduration.
 func Probe(ctx context.Context, rawURL, user, pass, ffprobePath string, timeout time.Duration, rwTimeoutMicros int) (Result, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return Result{}, fmt.Errorf("probe: WebDAV URL is required")
@@ -60,10 +62,13 @@ func Probe(ctx context.Context, rawURL, user, pass, ffprobePath string, timeout 
 	if ffprobePath == "" {
 		ffprobePath = "ffprobe"
 	}
+	// Only Basic auth goes in -headers. A forced "Range: bytes=0-" made
+	// Altmount return truncated bodies (206 replies shorter than the request),
+	// so ffprobe saw incomplete containers: MKV "Stream ends prematurely" and
+	// MP4 "moov atom not found". Bounded reads are configured in runFFProbe.
+	// The same auth value is passed to safeErrorText so it can be redacted.
 	auth := basicHeader(user, pass)
-	// Range: bytes=0- makes Altmount answer with 206 and lets ffprobe read only
-	// the header bytes it needs; no whole-file read is ever requested here.
-	headers := auth + "Range: bytes=0-\r\n"
+	headers := auth
 
 	var lastErr string
 	for attempt := 0; attempt < 2; attempt++ {
@@ -118,6 +123,8 @@ func runFFProbe(ctx context.Context, path string, rwTimeoutMicros int, headers, 
 		"-show_format",
 		"-show_streams",
 		"-show_chapters",
+		"-probesize", "33554432",
+		"-analyzeduration", "10000000",
 		"-headers", headers,
 		rawURL,
 	}
@@ -135,9 +142,8 @@ func runFFProbe(ctx context.Context, path string, rwTimeoutMicros int, headers, 
 
 func basicHeader(user, pass string) string {
 	token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
-	// ffprobe splits -headers on CRLF. Without the terminator the next header
-	// is concatenated onto this line, yielding a garbage auth token and no
-	// Range header (which would allow a full-body response).
+	// ffprobe splits -headers on CRLF; the terminator is required even when
+	// this is the only header, otherwise ffprobe can reject the auth line.
 	return "Authorization: Basic " + token + "\r\n"
 }
 

@@ -83,10 +83,11 @@ func New(cfg config.Config, st *store.Store, am *altmount.Client, tm *tmdb.Clien
 	}
 }
 
-// NewProbeFunc is the production ProbeFunc: it calls probe.Probe with a Range
-// request and Basic auth, then probe.Validate with a ranged sample reader that
-// reads 2+ distinct non-zero offsets from the same Altmount URL. An invalid
-// result is returned as an error so the caller never caches or pushes it.
+// NewProbeFunc is the production ProbeFunc: it calls probe.Probe with bounded
+// -probesize/-analyzeduration flags and Basic auth (no forced Range), then
+// probe.Validate with a ranged sample reader that reads 2+ distinct non-zero
+// offsets from the same Altmount URL. An invalid result is returned as an error
+// so the caller never caches or pushes it.
 func NewProbeFunc(cfg config.Config, h *http.Client) ProbeFunc {
 	if h == nil {
 		h = &http.Client{Timeout: httpTimeout(cfg.HTTPTimeout)}

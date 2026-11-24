@@ -62,7 +62,7 @@ func basicAuth(user, pass string) string {
 	return "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
-func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
+func TestProbePassesAuthAndBoundedProbeFlagsToFFprobe(t *testing.T) {
 	script := fakeFFProbe(t)
 	capture := captureArgs(t)
 	headerFile := filepath.Join(t.TempDir(), "headers.bin")
@@ -70,7 +70,10 @@ func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 	t.Setenv("FFPROBE_MODE", "json")
 	sourceURL := "http://127.0.0.1:8090/webdav/movie.mkv"
 	wantAuth := basicAuth(testUser, testPass)
-	wantHeaders := wantAuth + "\r\nRange: bytes=0-\r\n"
+	// Altmount truncates forced Range replies, so -headers must carry ONLY
+	// the CRLF-terminated Authorization line. Bounded reading is ffprobe's
+	// job via -probesize/-analyzeduration, not a forced bytes=0- Range.
+	wantHeaders := wantAuth + "\r\n"
 
 	res, err := Probe(context.Background(), sourceURL, testUser, testPass, script, 45*time.Second, 45_000_000)
 	if err != nil {
@@ -82,6 +85,8 @@ func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 		"-rw_timeout", "45000000",
 		"-print_format", "json",
 		"-show_format", "-show_streams", "-show_chapters",
+		"-probesize", "33554432",
+		"-analyzeduration", "10000000",
 		"-headers",
 	}
 	if len(args) != len(wantPrefix)+2 {
@@ -96,25 +101,25 @@ func TestProbePassesRangeAndAuthToFFprobe(t *testing.T) {
 	}
 
 	// The fake writes the -headers argument verbatim. Assert the exact
-	// CRLF-terminated lines: ffprobe splits on CRLF, so a missing terminator
-	// after the Authorization line merges it into the Range line (401 + full
-	// body). Failure messages never print the token.
+	// CRLF-terminated lines: ffprobe splits on CRLF, so the Authorization
+	// line must keep its terminator even though no second header follows.
+	// Failure messages never print the token.
 	rawHeaders, err := os.ReadFile(headerFile)
 	if err != nil {
 		t.Fatalf("read raw headers: %v", err)
 	}
 	if string(rawHeaders) != wantHeaders {
-		t.Errorf("ffprobe -headers value is not two CRLF-terminated lines (got %d bytes, want %d)", len(rawHeaders), len(wantHeaders))
+		t.Errorf("ffprobe -headers value is not the auth line only (got %d bytes, want %d)", len(rawHeaders), len(wantHeaders))
 	}
 	lines := strings.Split(string(rawHeaders), "\r\n")
-	if len(lines) != 3 || lines[0] != wantAuth || lines[1] != "Range: bytes=0-" || lines[2] != "" {
-		t.Errorf("ffprobe -headers lines are malformed: got %d CRLF-separated parts, want Authorization / Range / empty", len(lines))
+	if len(lines) != 2 || lines[0] != wantAuth || lines[1] != "" {
+		t.Errorf("ffprobe -headers lines are malformed: got %d CRLF-separated parts, want Authorization / empty", len(lines))
+	}
+	if strings.Contains(string(rawHeaders), "Range:") {
+		t.Errorf("ffprobe -headers still contains a forced Range line")
 	}
 	if !strings.Contains(headers, wantAuth) {
 		t.Errorf("captured headers missing the Basic auth line")
-	}
-	if !strings.Contains(headers, "Range: bytes=0-") {
-		t.Errorf("captured headers missing the Range line")
 	}
 	if strings.Contains(headers, testPass) || strings.Contains(headers, testUser+":"+testPass) {
 		t.Errorf("captured headers contain plaintext credentials")
