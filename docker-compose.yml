@@ -1,6 +1,6 @@
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:0.1.0
+    image: ghcr.io/leleasley/rex-alt:v0.1.0
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
