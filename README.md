@@ -106,7 +106,7 @@ You can either use the provided image-only `/opt/rex-alt/docker-compose.yml` as-
 ```yaml
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:v0.1.0
+    image: ghcr.io/leleasley/rex-alt:v0.1.1
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
