@@ -30,7 +30,7 @@ type davResponse struct {
 	Href string `xml:"href"`
 }
 
-// propfind issues PROPFIND <target> with Depth: 2 and Basic auth, and returns
+// propfind issues PROPFIND <target> with Depth: infinity and Basic auth, and returns
 // the decoded response hrefs. A non-2xx status or a non-multistatus body is an
 // error; the body is never echoed because it could contain credentials.
 func (c *Client) propfind(ctx context.Context, target string) ([]string, error) {

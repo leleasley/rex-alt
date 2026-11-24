@@ -17,7 +17,10 @@ const (
 	webdavPrefix       = "/webdav/"
 	defaultHTTPTimeout = 15 * time.Second
 	propfindMethod     = "PROPFIND"
-	propfindDepth      = "2"
+	// Altmount answers PROPFIND with Depth: 0/1/infinity but rejects Depth: 2
+	// with HTTP 400. infinity is the only depth that lists release folders and
+	// their files in one request (live-verified against the real share).
+	propfindDepth = "infinity"
 )
 
 // Client talks to one Altmount WebDAV share. NewClient is the only constructor;

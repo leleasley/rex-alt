@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Realistic Altmount WebDAV PROPFIND response. The share is mounted under
-     /webdav/; this fixture is a Depth: 2 listing of /webdav/movies/. -->
+     /webdav/; this fixture is a Depth: infinity listing of /webdav/movies/.
+     Altmount rejects Depth: 2 with HTTP 400, so infinity is required to see
+     both release folders and their files in one request. -->
 <d:multistatus xmlns:d="DAV:" xmlns:lp1="http://apache.org/dav/props/">
   <d:response>
     <d:href>/webdav/movies/</d:href>
@@ -84,6 +86,20 @@
     <d:href>/webdav/movies/Rel/subs/English.srt</d:href>
     <d:propstat>
       <d:prop><d:resourcetype/><d:getcontentlength>48000</d:getcontentlength></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/Rel/subs/Featurette.mkv</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype/><d:getcontentlength>20971520</d:getcontentlength></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/webdav/movies/10.Cloverfield.Lane.2016.720p.BluRay.DD5.1.x264-HiDt/Sample.mkv</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype/><d:getcontentlength>1048576</d:getcontentlength></d:prop>
       <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>
   </d:response>

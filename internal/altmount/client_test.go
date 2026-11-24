@@ -50,8 +50,8 @@ func TestListParsesPROPFIND207(t *testing.T) {
 		if r.URL.Path != "/webdav/movies/" {
 			t.Errorf("path = %q, want /webdav/movies/", r.URL.Path)
 		}
-		if got := r.Header.Get("Depth"); got != "2" {
-			t.Errorf("Depth = %q, want 2", got)
+		if got := r.Header.Get("Depth"); got != "infinity" {
+			t.Errorf("Depth = %q, want infinity (Altmount rejects 2 with HTTP 400)", got)
 		}
 		if r.URL.User != nil {
 			t.Error("request URL carried userinfo; credentials belong in Basic auth")
@@ -77,7 +77,7 @@ func TestListParsesPROPFIND207(t *testing.T) {
 	}
 	wantPaths := []string{"movies/Rel/file.mkv", "movies/Rel/second.mp4"}
 	if len(entries) != len(wantPaths) {
-		t.Fatalf("got %d entries (%+v), want %d: subtitles, NFOs and samples must be skipped", len(entries), entries, len(wantPaths))
+		t.Fatalf("got %d entries (%+v), want %d: subtitles, NFOs, samples and nested files must be skipped", len(entries), entries, len(wantPaths))
 	}
 	for i, e := range entries {
 		if e.Path != wantPaths[i] {
@@ -95,6 +95,43 @@ func TestListParsesPROPFIND207(t *testing.T) {
 		if e.Season != 0 || e.Episode != 0 {
 			t.Errorf("entry %d season/episode = %d/%d, want 0/0 (Task 7 parses these)", i, e.Season, e.Episode)
 		}
+	}
+}
+
+// TestPropfindNeverUsesDepthTwo records a live Altmount finding: Depth: 2 gets
+// HTTP 400, while Depth: 0/1/infinity answer 207 and infinity is the only depth
+// that includes files below a release folder. The fake server mimics the 400,
+// so a regression to "2" fails the test instead of silently passing locally.
+func TestPropfindNeverUsesDepthTwo(t *testing.T) {
+	var depthTwo atomic.Int32
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got := r.Header.Get("Depth"); got == "2" {
+			depthTwo.Add(1)
+			w.WriteHeader(http.StatusBadRequest) // exactly what Altmount returns
+			return
+		} else if got != "infinity" {
+			t.Errorf("Depth = %q, want infinity", got)
+		}
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:"/>`))
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL+"/webdav/", testDAVUser, testDAVPass, server.Client())
+	entries, err := c.List(context.Background(), "tv")
+	if err != nil {
+		t.Fatalf("List: %v; a Depth: 2 regression gets HTTP 400 on real Altmount", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("got %v entries, want none", entries)
+	}
+	if got := depthTwo.Load(); got != 0 {
+		t.Errorf("client sent Depth: 2 %d time(s); Altmount rejects it with HTTP 400", got)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d PROPFIND requests, want 1 (no retry on 400)", got)
 	}
 }
 
