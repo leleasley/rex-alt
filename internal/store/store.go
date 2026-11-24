@@ -204,6 +204,18 @@ func (s *Store) RemoveEntriesNotIn(ids []string) (int, error) {
 	return removed, nil
 }
 
+// DeleteEntry removes one entry from the catalogue by id. Unlike
+// RemoveEntriesNotIn it has no truncation guard: the caller has positive
+// evidence (an HTTP 404 from the source) that this single file is gone. Probe
+// and TMDB caches are keyed by id and left alone, so a returning file can be
+// picked up by a later enumeration without re-enriching it.
+func (s *Store) DeleteEntry(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM entries WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("store: delete entry %q: %w", id, err)
+	}
+	return nil
+}
+
 // SetProbe caches the full ffprobe JSON for id together with its digest.
 func (s *Store) SetProbe(id, json, digest string) error {
 	_, err := s.db.Exec(`INSERT INTO probes (id, json, digest) VALUES (?, ?, ?)

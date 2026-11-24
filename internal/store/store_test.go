@@ -174,6 +174,27 @@ func TestRemoveEntriesNotInDeletesStale(t *testing.T) {
 	}
 }
 
+func TestDeleteEntryRemovesOnlyTheNamedEntry(t *testing.T) {
+	s := testStore(t)
+	missing := models.Entry{ID: "movies/Driven.2018/f.mkv", Path: "movies/Driven.2018/f.mkv", Category: "movies", Release: "Driven.2018", File: "f.mkv"}
+	keep := models.Entry{ID: "movies/Alpha.2022/a.mkv", Path: "movies/Alpha.2022/a.mkv", Category: "movies", Release: "Alpha.2022", File: "a.mkv"}
+	seed(t, s, missing, keep)
+
+	if err := s.DeleteEntry(missing.ID); err != nil {
+		t.Fatalf("DeleteEntry: %v", err)
+	}
+	got, err := s.Entries()
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("after delete: entries = %+v, want only %+v", got, keep)
+	}
+	if got[0] != keep {
+		t.Errorf("remaining entry = %+v, want %+v", got[0], keep)
+	}
+}
+
 func TestStateSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, err := Open(path)

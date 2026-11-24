@@ -195,6 +195,7 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 	results := make([]probe.Result, len(work))
 	valid := make([]bool, len(work))
 	fresh := make([]bool, len(work))
+	errs := make([]error, len(work))
 	misses := make([]int, 0, len(work))
 	for i, e := range work {
 		body, digest, ok := s.db.Probe(e.ID)
@@ -205,8 +206,20 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 		}
 		misses = append(misses, i)
 	}
-	s.probeMissing(ctx, work, misses, results, valid, fresh)
+	s.probeMissing(ctx, work, misses, results, valid, fresh, errs)
 	stats.Probed = len(misses)
+	// A 404 means the source no longer has this file. Drop it from the local
+	// catalogue so a later enumeration can add it back if it returns. Every
+	// other failure stays held for the next pass, as before: the entry is
+	// never pushed and its probe is never cached.
+	for _, i := range misses {
+		if errs[i] == nil || !strings.Contains(strings.ToLower(errs[i].Error()), "404") {
+			continue
+		}
+		if err := s.db.DeleteEntry(work[i].ID); err != nil {
+			return stats, fmt.Errorf("sync: delete missing entry %q: %w", work[i].ID, err)
+		}
+	}
 	// A probe is cached only after validation has accepted it.
 	for _, i := range misses {
 		if !valid[i] {
@@ -304,8 +317,10 @@ func (s *Service) enrich(ctx context.Context, e models.Entry) models.Enriched {
 
 // probeMissing validates and caches fresh probes with at most ProbeWorkers
 // concurrent ffprobe runs. Results land in their original entry indices so
-// pushes stay in catalogue order and held entries are easy to count.
-func (s *Service) probeMissing(ctx context.Context, entries []models.Entry, misses []int, results []probe.Result, valid, fresh []bool) {
+// pushes stay in catalogue order and held entries are easy to count. errs is
+// indexed the same way and carries each item's probe or validation error so
+// SyncOnce can tell a vanished file (404) from a merely held one.
+func (s *Service) probeMissing(ctx context.Context, entries []models.Entry, misses []int, results []probe.Result, valid, fresh []bool, errs []error) {
 	if len(misses) == 0 {
 		return
 	}
@@ -326,11 +341,13 @@ func (s *Service) probeMissing(ctx context.Context, entries []models.Entry, miss
 				e := entries[idx]
 				result, err := s.prb(ctx, e)
 				if err != nil {
+					errs[idx] = err
 					continue
 				}
 				// probe.Probe does not validate: an ffprobe document can describe
 				// a zero-filled file. Reject it here, before cache and push.
 				if err := probe.Validate(result, s.rangedSample(ctx, e)); err != nil {
+					errs[idx] = err
 					continue
 				}
 				results[idx] = result

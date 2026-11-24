@@ -308,6 +308,62 @@ func TestSyncOncePushesProbedItems(t *testing.T) {
 	}
 }
 
+func TestSyncOnceDropsEntryWhoseProbeReturns404(t *testing.T) {
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	// Beta is still enumerated by Altmount but its WebDAV file is gone.
+	dav.setFiles("movies", movieAlpha, movieBeta)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	primeAll(t, st)
+	rx := newREX(t, nil)
+	cfg := testConfig(server.URL)
+	cfg.SyncMaxMovies = 0 // both movies are worked on this pass
+
+	missingPath := strings.TrimPrefix(movieBeta, "/webdav/")
+	prb := func(ctx context.Context, e models.Entry) (probe.Result, error) {
+		if e.Path == missingPath {
+			return probe.Result{}, fmt.Errorf("sync: probe: GET %s: 404 Not Found", e.Path)
+		}
+		return goodProbe(ctx, e)
+	}
+	svc := newService(t, cfg, st, server.URL, rx, prb)
+
+	stats, err := svc.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	if stats.Probed != 2 || stats.Pushed != 1 || stats.Held != 1 {
+		t.Errorf("stats = %+v, want Probed=2 Pushed=1 Held=1 (404 held, not pushed)", stats)
+	}
+
+	entries, err := st.Entries()
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want only the healthy movie", entries)
+	}
+	wantPath := strings.TrimPrefix(movieAlpha, "/webdav/")
+	if entries[0].Path != wantPath {
+		t.Errorf("remaining path = %q, want %q", entries[0].Path, wantPath)
+	}
+	if _, _, ok := st.Probe(entries[0].ID); !ok {
+		t.Error("healthy entry's probe was not cached")
+	}
+
+	_, _, pushes, deletes := rx.snapshot()
+	if deletes != 0 {
+		t.Errorf("got %d REX deletes, want 0", deletes)
+	}
+	if len(pushes) != 1 || len(pushes[0].Items) != 1 {
+		t.Fatalf("pushes = %v, want one push of the healthy item", pushSizes(pushes))
+	}
+	if got := pushes[0].Items[0].Path; got != wantPath {
+		t.Errorf("pushed path = %q, want %q (404 item must not be pushed)", got, wantPath)
+	}
+}
+
 func pushSizes(pushes []pushedFeed) []int {
 	out := make([]int, len(pushes))
 	for i, feed := range pushes {
