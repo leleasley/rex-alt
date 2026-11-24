@@ -148,7 +148,7 @@ Check the add-on's liveness endpoint (no token needed):
 
 ```bash
 curl -sS http://<host>:9982/api/v1/health
-# Expected: {"status":"ok","version":"0.1.2"}
+# Expected: {"status":"ok","version":"v0.1.2"}
 ```
 
 Check that REX knows the source (REX answers with the source shape, never credentials):
