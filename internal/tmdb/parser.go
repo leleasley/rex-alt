@@ -15,6 +15,16 @@ var (
 	yearRE          = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
 	bracketRE       = regexp.MustCompile(`\[[^]]*\]|\([^)]*\)`)
 	resolutionRE    = regexp.MustCompile(`^\d{3,4}[pi]$`)
+
+	// Audio codecs arrive both dotted (DD5.1) and spaced (DD5 1, DTS HD MA).
+	// Dots have already become spaces by the time these run, so every pattern
+	// tolerates whitespace and separators. Channel counts are limited to 5.1
+	// and 7.1 so title numbers such as "10" and "12.12.12" are never lost.
+	ddCodecRE       = regexp.MustCompile(`(?i)\bddp?\+?\s*\d(?:\s*\d)?\b`)
+	dtsCodecRE      = regexp.MustCompile(`(?i)\bdts(?:[\s.-]+hd)?(?:[\s.-]+ma)?\b`)
+	channelCountRE  = regexp.MustCompile(`(?i)\b[57]\s*[.,]?\s*1\b`)
+	codecHintRE     = regexp.MustCompile(`(?i)\b(?:ddp?\+?\d*|dts|truehd|atmos|e?ac3|aac|flac|mp3)`)
+	audioFragmentRE = regexp.MustCompile(`(?i)\b(?:ddp|dd|hd|ma)\b|\bdd\+`)
 )
 
 // videoExtensions are the only suffixes stripped from a filename. A release
@@ -75,6 +85,8 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 		base = base[:loc[0]] + " " + base[loc[1]:]
 	}
 
+	base = stripAudioCodecs(base)
+
 	// Group tags in brackets are removed last so a year such as "(2022)" is
 	// still available to the extraction above.
 	base = bracketRE.ReplaceAllString(base, " ")
@@ -87,6 +99,20 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 		}
 	}
 	return strings.Join(kept, " "), year, season, episode
+}
+
+// stripAudioCodecs removes composite audio tags that the single-token junk
+// filter cannot see (DD5.1, DDP5.1, DD+5.1, DTS-HD.MA, bare 5.1/7.1). Bare
+// fragment tokens such as HD or MA are removed only when some codec hint is
+// elsewhere in the name, so a legitimate title word is never discarded.
+func stripAudioCodecs(s string) string {
+	s = ddCodecRE.ReplaceAllString(s, " ")
+	s = dtsCodecRE.ReplaceAllString(s, " ")
+	s = channelCountRE.ReplaceAllString(s, " ")
+	if codecHintRE.MatchString(s) {
+		s = audioFragmentRE.ReplaceAllString(s, " ")
+	}
+	return s
 }
 
 func isTVCategory(category string) bool {

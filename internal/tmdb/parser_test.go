@@ -67,6 +67,44 @@ func TestParseReleaseMovie(t *testing.T) {
 	}
 }
 
+// Audio-codec tags must not survive into the title: the TMDB guard requires an
+// exact normalised-title match, so a leftover "DD5 1" prevents enrichment.
+func TestParseReleaseStripsAudioCodecs(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+	}{
+		// Live-verification finding and its DDP / DD+ / DTS-HD.MA variants.
+		{"10.Cloverfield.Lane.2016.720p.BluRay.DD5.1.x264-HiDt", "10 Cloverfield Lane", 2016},
+		{"10.Cloverfield.Lane.2016.720p.BluRay.DDP5.1.x264-HiDt", "10 Cloverfield Lane", 2016},
+		{"10.Cloverfield.Lane.2016.720p.BluRay.DD+5.1.x264-HiDt", "10 Cloverfield Lane", 2016},
+		{"10.Cloverfield.Lane.2016.720p.BluRay.DTS-HD.MA.5.1.x264-HiDt", "10 Cloverfield Lane", 2016},
+		// Spaced forms and other common audio tags.
+		{"Movie.Title.2020.1080p.BluRay.DTS-HD.x264-GROUP", "Movie Title", 2020},
+		{"Movie.Title.2020.1080p.WEB.DD5 1.x264-GROUP", "Movie Title", 2020},
+		{"Movie.Title.2020.1080p.WEB.TrueHD.7.1.Atmos.x264-GROUP", "Movie Title", 2020},
+		{"Movie.Title.2020.1080p.WEB.EAC3.AAC.FLAC-GROUP", "Movie Title", 2020},
+		// Controls: a plain title still parses, and leading title numbers survive.
+		{"Swallowed.2022.1080p.BluRay.x264-DST", "Swallowed", 2022},
+		{"12.12.12.2022.720p.WEB-DL.x264-GROUP", "12 12 12", 2022},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != tc.wantYear {
+				t.Errorf("year = %d, want %d", year, tc.wantYear)
+			}
+			if season != 0 || ep != 0 {
+				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			}
+		})
+	}
+}
+
 func TestParseReleaseEpisode(t *testing.T) {
 	title, year, season, ep := ParseRelease(
 		"Something.Very.Bad.is.Going.to.Happen.S01E03.2160p.WEB.h265-ETHEL", "tv")
