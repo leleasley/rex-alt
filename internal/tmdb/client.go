@@ -35,10 +35,12 @@ const (
 	// Conservative Dice threshold. Residual release junk lowers a genuine
 	// match to roughly 0.7; unrelated films score far below this.
 	minTitleScore = 0.6
-	// A title whose every token occurs in the parsed query is this strong a
-	// match. It stays below the 1.0 of an exact normalised match so exact
-	// titles still win ties, but clears minTitleScore on its own.
-	containedTitleScore = 0.95
+	// A title whose every token occurs in the parsed query is boosted by
+	// base + span*(candidate tokens / query tokens), i.e. 0.6..0.95. Scaling
+	// with coverage keeps a more complete candidate ahead of a shorter subset
+	// while the cap stays below the 1.0 of an exact normalised match.
+	containedTitleBase = 0.6
+	containedTitleSpan = 0.35
 )
 
 // scoringApostrophes is used only by the match scorer: TMDB writes "Patch's"
@@ -271,8 +273,9 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 // never displace the right film or trigger a wrong-id attach. Higher scores
 // win; ties keep the higher-ranked result, except that an exact normalised
 // title match (score 1.0) wins a tie as required. A candidate whose tokens are
-// all contained in the parsed title scores containedTitleScore, which recovers
-// releases with trailing codec/group junk that Dice alone would reject.
+// all contained in the parsed title gets a boost proportional to the share of
+// query tokens it covers, which recovers releases with trailing codec/group
+// junk without letting a short subset outrank a more complete title.
 func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle string, wantYear int) int {
 	limit := len(results)
 	if limit > maxSearchResults {
@@ -332,8 +335,9 @@ func titleScore(want, got string) float64 {
 // which dilutes the Dice overlap with the real title below minTitleScore;
 // containment recognises the real title as a subset without a junk-token list.
 // A candidate with any extra token is never contained, so extended or
-// unrelated titles cannot be mistaken for the parsed one. The score stays
-// below 1.0 so an exact normalised match still wins a tie.
+// unrelated titles cannot be mistaken for the parsed one. The boost grows with
+// the share of query tokens covered, so a complete title outranks a shorter
+// subset on the same tokens; it stays below 1.0 so an exact match still wins.
 func containmentScore(want, got string) float64 {
 	wantTokens, gotTokens := titleTokens(want), titleTokens(got)
 	if len(wantTokens) == 0 || len(gotTokens) < 2 {
@@ -349,7 +353,7 @@ func containmentScore(want, got string) float64 {
 		}
 		counts[token]--
 	}
-	return containedTitleScore
+	return containedTitleBase + containedTitleSpan*float64(len(gotTokens))/float64(len(wantTokens))
 }
 
 // titleTokens is the scoring-only normalisation: apostrophes are deleted

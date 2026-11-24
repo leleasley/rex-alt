@@ -3,6 +3,7 @@ package tmdb
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -477,6 +478,125 @@ func TestEnrichResolvesTitleWithTrailingCodecTokens(t *testing.T) {
 	}
 }
 
+// With no year parsed the year gate is open, so every hit is eligible and the
+// score alone must pick the film. A constant containment boost flattened the
+// shorter subset and the full sequel to the same score, letting the
+// higher-ranked shorter film win; a proportional boost must prefer the more
+// complete candidate.
+func TestEnrichNoYearPrefersMoreCompleteContainedTitle(t *testing.T) {
+	cases := []struct {
+		name, search, title, wantTitle string
+		wantID                         int
+		wantDate                       string
+	}{
+		{
+			name:      "shorter subset does not displace the full title",
+			search:    "movie_search_christmas.json",
+			title:     "A Christmas Story Christmas X 265-EVO",
+			wantID:    9203,
+			wantTitle: "A Christmas Story Christmas",
+			wantDate:  "2022-11-17",
+		},
+		{
+			name:      "subset does not displace a roman-numeral sequel",
+			search:    "movie_search_dalmatians.json",
+			title:     "101 Dalmatians 2 Patchs London Adventure AVC",
+			wantID:    9102,
+			wantTitle: "101 Dalmatians II: Patch's London Adventure",
+			wantDate:  "2003-01-21",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			searchBody := fixture(t, tc.search)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.wantID)
+			detailsBody := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,`+
+					`"overview":"Proportional containment overview.",`+
+					`"poster_path":"/p.jpg","backdrop_path":"/b.jpg"}`,
+				tc.wantID, tc.wantID, tc.wantTitle, tc.wantDate)
+
+			var mu sync.Mutex
+			var detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					writeJSON(w, searchBody)
+				case wantDetails:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					writeJSON(w, detailsBody)
+				default:
+					// Fetching a decoy's details would be a wrong-id attach.
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, 0, 0, 0, false)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q", tc.title)
+			}
+			if en.TMDBID != tc.wantID {
+				t.Errorf("TMDBID = %d, want %d (no year: prefer the more complete title)", en.TMDBID, tc.wantID)
+			}
+			if en.Title != tc.wantTitle || en.Date != tc.wantDate {
+				t.Errorf("metadata = %+v", en)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// Control for the open year gate: with no year parsed, rejection must still
+// come from the score, and no details request may be made for a decoy.
+func TestEnrichRejectsUnrelatedCandidateWithNoYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "movie_search_train_dreams_extended.json")
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Train Dreams H 265-XEBEC", 0, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated no-year candidate")
+	}
+}
+
 // Containment must not widen the wrong-id guard: a candidate with extra tokens
 // that are absent from the parsed query is still rejected, even when its other
 // tokens and year line up.
@@ -578,6 +698,34 @@ func TestTitleScoreNoisyTitlesClearThreshold(t *testing.T) {
 	}
 }
 
+// Containment must be proportional to how much of the parsed query the
+// candidate covers: a more complete title scores higher, and the boost always
+// stays strictly below the 1.0 of an exact normalised match.
+func TestContainmentScoreIsProportional(t *testing.T) {
+	cases := []struct {
+		name, want, got string
+		score           float64
+	}{
+		{"two of five query tokens", "Train Dreams H 265-XEBEC", "Train Dreams", 0.74},
+		{"three of seven query tokens", "A Christmas Story Christmas X 265-EVO", "A Christmas Story", 0.75},
+		{"four of seven query tokens", "A Christmas Story Christmas X 265-EVO", "A Christmas Story Christmas", 0.80},
+		{"full query stays below exact", "Train Dreams", "Train Dreams", 0.95},
+		{"candidate with extra token is not contained", "Train Dreams H 265-XEBEC", "Train Dreams Revisited", 0},
+		{"single-token candidate is not contained", "Swallowed H 265-XEBEC", "Swallowed", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containmentScore(tc.want, tc.got)
+			if math.Abs(got-tc.score) > 1e-9 {
+				t.Errorf("containmentScore(%q, %q) = %.4f, want %.4f", tc.want, tc.got, got, tc.score)
+			}
+			if got >= 1 {
+				t.Errorf("containment score %v must stay below exact-match 1.0", got)
+			}
+		})
+	}
+}
+
 func TestBestHitIndexGuardsAndTieBreaks(t *testing.T) {
 	type hit struct{ title, date string }
 	titleOf := func(h hit) string { return h.title }
@@ -630,6 +778,16 @@ func TestBestHitIndexGuardsAndTieBreaks(t *testing.T) {
 			name:    "candidate with extra tokens is not contained",
 			results: []hit{{title: "Train Dreams Revisited", date: "2025-11-21"}},
 			want:    "Train Dreams H 265-XEBEC", year: 2025, index: -1,
+		},
+		{
+			name:    "no year: shorter contained title does not win",
+			results: []hit{{title: "A Christmas Story", date: "1983-11-18"}, {title: "A Christmas Story Christmas", date: "2022-11-17"}},
+			want:    "A Christmas Story Christmas X 265-EVO", year: 0, index: 1,
+		},
+		{
+			name:    "no year: contained subset does not beat a roman-numeral sequel",
+			results: []hit{{title: "101 Dalmatians", date: "1996-11-27"}, {title: "101 Dalmatians II: Patch's London Adventure", date: "2003-01-21"}},
+			want:    "101 Dalmatians 2 Patchs London Adventure AVC", year: 0, index: 1,
 		},
 	}
 	for _, tc := range cases {
