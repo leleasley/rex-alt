@@ -108,7 +108,7 @@ You can either use the provided image-only `/opt/rex-alt/docker-compose.yml` as-
 ```yaml
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:v0.1.5
+    image: ghcr.io/leleasley/rex-alt:v0.1.6
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
@@ -150,7 +150,7 @@ Check the add-on's liveness endpoint (no token needed):
 
 ```bash
 curl -sS http://<host>:9982/api/v1/health
-# Expected: {"status":"ok","version":"v0.1.5"}
+# Expected: {"status":"ok","version":"v0.1.6"}
 ```
 
 Check that REX knows the source (REX answers with the source shape, never credentials):
