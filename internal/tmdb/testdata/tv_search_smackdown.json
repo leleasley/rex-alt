@@ -1,0 +1,31 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 8201,
+      "name": "WWE SmackDown Live",
+      "first_air_date": "2016-07-19",
+      "overview": "Live specials.",
+      "poster_path": "/sdl.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8202,
+      "name": "SmackDown Talk",
+      "first_air_date": "2018-01-01",
+      "overview": "Post-show talk.",
+      "poster_path": "/sdt.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8203,
+      "name": "WWE Friday Night SmackDown",
+      "first_air_date": "1999-08-26",
+      "overview": "WWE Friday Night SmackDown.",
+      "poster_path": "/smackdown-poster.jpg",
+      "backdrop_path": "/smackdown-backdrop.jpg"
+    }
+  ],
+  "total_results": 3,
+  "total_pages": 1
+}

@@ -1,0 +1,31 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 8401,
+      "name": "Raw By The Numbers",
+      "first_air_date": "2020-01-01",
+      "overview": "Low-scoring lookalike.",
+      "poster_path": "/raw-numbers.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8402,
+      "name": "Total Divas",
+      "first_air_date": "2013-07-28",
+      "overview": "Unrelated reality show.",
+      "poster_path": "/total-divas.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8403,
+      "name": "Completely Different Show",
+      "first_air_date": "2021-01-01",
+      "overview": "Unrelated show.",
+      "poster_path": "/different.jpg",
+      "backdrop_path": null
+    }
+  ],
+  "total_results": 3,
+  "total_pages": 1
+}

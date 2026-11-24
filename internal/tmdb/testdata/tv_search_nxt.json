@@ -1,0 +1,23 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 8301,
+      "name": "NXT UK",
+      "first_air_date": "2018-10-17",
+      "overview": "UK brand show.",
+      "poster_path": "/nxt-uk.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8302,
+      "name": "NXT",
+      "first_air_date": "2010-06-23",
+      "overview": "WWE NXT.",
+      "poster_path": "/nxt-poster.jpg",
+      "backdrop_path": "/nxt-backdrop.jpg"
+    }
+  ],
+  "total_results": 2,
+  "total_pages": 1
+}

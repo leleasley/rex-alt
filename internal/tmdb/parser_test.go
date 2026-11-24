@@ -184,6 +184,64 @@ func TestParseReleaseTVSeasonOnlyDropsBareSeason(t *testing.T) {
 	}
 }
 
+// Daily wrestling shows carry an episode air date instead of an SxxExx
+// marker. "2026.11.23" is the episode's air date, not the show's first-air
+// year: it (and the release tags after it) must be stripped so the show name
+// reaches TMDB clean and the year stays 0 (no year gate).
+func TestParseReleaseDatedDailyShow(t *testing.T) {
+	cases := []struct {
+		name, wantTitle string
+	}{
+		{
+			name:      "WWE.Monday.Night.RAW.2026.11.23.1080p.WEBRip.h265-Star.mp4",
+			wantTitle: "WWE Monday Night RAW",
+		},
+		{
+			name:      "WWE.Friday.Night.SmackDown.2026.11.20.1080p.WEBRip.AAC2.0.HFR.H.265-SkY.mkv",
+			wantTitle: "WWE Friday Night SmackDown",
+		},
+		{
+			name:      "WWE.RAW.2026.11.16.1080p.WEBRip.x264-DEF.mkv",
+			wantTitle: "WWE RAW",
+		},
+		// Dash and space separators for the same air date.
+		{
+			name:      "WWE.RAW.2026-11-16.1080p.WEBRip.x264-DEF.mkv",
+			wantTitle: "WWE RAW",
+		},
+		{
+			name:      "WWE.NXT.2026 11 18.1080p.WEB-DL.x264-GRP.mkv",
+			wantTitle: "WWE NXT",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "tv")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != 0 {
+				t.Errorf("year = %d, want 0 (air date is not a first-air year)", year)
+			}
+			if season != 0 || ep != 0 {
+				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			}
+		})
+	}
+}
+
+// The date rule is limited to TV releases without an SxxExx marker: an
+// ordinary episode keeps its marker-derived season/episode and truncated
+// title even when an air date follows it.
+func TestParseReleaseDatedEpisodeKeepsMarkerBehaviour(t *testing.T) {
+	title, year, season, ep := ParseRelease(
+		"Show.Name.S02E04.2026.11.23.1080p.WEB-DL-GRP.mkv", "tv")
+	if title != "Show Name" || year != 0 || season != 2 || ep != 4 {
+		t.Errorf("got title=%q year=%d season=%d episode=%d, want Show Name/0/2/4",
+			title, year, season, ep)
+	}
+}
+
 // Movie controls: the TV-only truncation/stripping must not disturb movies,
 // including titles that start with digits and carry audio codec tags.
 func TestParseReleaseMovieControlUnaffected(t *testing.T) {

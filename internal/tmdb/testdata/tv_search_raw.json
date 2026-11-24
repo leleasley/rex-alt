@@ -1,0 +1,39 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 8101,
+      "name": "WWE Raw Classics",
+      "first_air_date": "1993-01-11",
+      "overview": "Classic episodes.",
+      "poster_path": "/raw-classics.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8102,
+      "name": "WWE Raw Top 10",
+      "first_air_date": "2015-06-01",
+      "overview": "Countdown show.",
+      "poster_path": "/raw-top10.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8103,
+      "name": "Raw Talk",
+      "first_air_date": "2016-07-25",
+      "overview": "Post-show talk.",
+      "poster_path": "/raw-talk.jpg",
+      "backdrop_path": null
+    },
+    {
+      "id": 8104,
+      "name": "Raw",
+      "first_air_date": "1993-01-11",
+      "overview": "WWE Monday Night Raw.",
+      "poster_path": "/raw-poster.jpg",
+      "backdrop_path": "/raw-backdrop.jpg"
+    }
+  ],
+  "total_results": 4,
+  "total_pages": 1
+}

@@ -42,6 +42,31 @@ const (
 // is deliberately left untouched.
 var scoringApostrophes = strings.NewReplacer("'", "", "\u2019", "")
 
+// tvSearchAliases is a deliberately small exception to the title score: daily
+// wrestling brands are released with a "WWE" prefix and an episode date, but
+// TMDB indexes some of the series under shorter or older names. Keys are
+// normalised parsed show names; values are the exact TMDB search strings.
+// Keep this list explicit — every title not listed here is unaffected and
+// still judged by the 0.6 Dice threshold and the year gate.
+var tvSearchAliases = map[string]string{
+	"wwe monday night raw":       "Raw",
+	"wwe raw":                    "Raw",
+	"raw":                        "Raw",
+	"wwe friday night smackdown": "WWE Friday Night SmackDown",
+	"smackdown":                  "WWE Friday Night SmackDown",
+	"wwe nxt":                    "NXT",
+	"nxt":                        "NXT",
+}
+
+// tvSearchTitle applies the alias only on the TV search path. It runs after
+// the cache key is computed, so cache entries keep the parsed release title.
+func tvSearchTitle(title string) string {
+	if alias, ok := tvSearchAliases[normalizeTitle(title)]; ok {
+		return alias
+	}
+	return title
+}
+
 // Client resolves release metadata against TMDB. The read token (v4 bearer) is
 // preferred; a v3 API key is used only when no read token is configured. Both
 // credentials are kept out of every error and never logged.
@@ -76,8 +101,10 @@ func NewClient(readToken, apiKey string, cache *store.Store, h *http.Client) *Cl
 // overlap, and the best hit is accepted only when it clears minTitleScore and
 // (when a year was parsed) carries a year within one of it. An ambiguous or
 // mismatched hit yields ok=false and no id, so an unrelated TMDB id can never
-// be attached to a file. Successful results are cached in SQLite under the
-// normalised title|year|isShow|season|episode key.
+// be attached to a file. On the TV path, a small documented alias map rewrites
+// well-known daily/wrestling brands before search; all other titles are
+// untouched. Successful results are cached in SQLite under the normalised
+// title|year|isShow|season|episode key.
 func (c *Client) Enrich(ctx context.Context, title string, year, season, episode int, isShow bool) (models.Enriched, bool, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -93,6 +120,9 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 	var en models.Enriched
 	var posterPath, backdropPath, showPosterPath, showBackdropPath string
 	if isShow {
+		// Daily/wrestling brands use a documented alias for both the TMDB
+		// query and the title score; other shows keep the parsed title.
+		title = tvSearchTitle(title)
 		type searchResult struct {
 			ID           int    `json:"id"`
 			Name         string `json:"name"`

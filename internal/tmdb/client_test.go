@@ -654,6 +654,142 @@ func TestEnrichShowEpisode(t *testing.T) {
 	}
 }
 
+// Daily wrestling brands are released with a WWE prefix and an episode date,
+// but TMDB indexes the series under a shorter name. These fake results put the
+// "Classics"/"Talk"/"UK" decoys ahead of the real show: the documented alias
+// must rewrite the query and let the exact hit win with no year gate (the
+// parsed 2026 date is an air date, so year is 0).
+func TestEnrichResolvesDailyWrestlingShows(t *testing.T) {
+	cases := []struct {
+		name, title, search, wantQuery, wantTitle, wantDate string
+		wantID                                              int
+	}{
+		{
+			name:      "monday night raw",
+			title:     "WWE Monday Night RAW",
+			search:    "tv_search_raw.json",
+			wantQuery: "Raw",
+			wantID:    8104,
+			wantTitle: "Raw",
+			wantDate:  "1993-01-11",
+		},
+		{
+			name:      "friday night smackdown",
+			title:     "WWE Friday Night SmackDown",
+			search:    "tv_search_smackdown.json",
+			wantQuery: "WWE Friday Night SmackDown",
+			wantID:    8203,
+			wantTitle: "WWE Friday Night SmackDown",
+			wantDate:  "1999-08-26",
+		},
+		{
+			name:      "nxt",
+			title:     "WWE NXT",
+			search:    "tv_search_nxt.json",
+			wantQuery: "NXT",
+			wantID:    8302,
+			wantTitle: "NXT",
+			wantDate:  "2010-06-23",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			searchBody := fixture(t, tc.search)
+
+			var mu sync.Mutex
+			var paths []string
+			var search seenRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				mu.Unlock()
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/tv":
+					snap := snapshot(r)
+					mu.Lock()
+					search = snap
+					mu.Unlock()
+					writeJSON(w, searchBody)
+				default:
+					// Fetching a decoy's endpoint would be a wrong-id attach.
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, 0, 0, 0, true)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q; want TMDB id %d", tc.title, tc.wantID)
+			}
+			if en.TMDBID != tc.wantID || en.ShowTitle != tc.wantTitle || en.Date != tc.wantDate {
+				t.Errorf("Enriched = %+v, want id=%d title=%q date=%q", en, tc.wantID, tc.wantTitle, tc.wantDate)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if search.path == "" {
+				t.Fatal("no /3/search/tv request was made")
+			}
+			if got := search.query.Get("query"); got != tc.wantQuery {
+				t.Errorf("query = %q, want alias %q", got, tc.wantQuery)
+			}
+			if got := search.query.Get("first_air_date_year"); got != "" {
+				t.Errorf("first_air_date_year = %q, want absent when year is 0", got)
+			}
+			for _, p := range paths {
+				if strings.HasPrefix(p, "/3/tv/") {
+					t.Errorf("fetched a show endpoint %q; no season/episode was requested", p)
+				}
+			}
+		})
+	}
+}
+
+// With year=0 the year gate is open, so rejection must come from the pinned
+// 0.6 Dice threshold. A low-scoring lookalike and unrelated shows must never
+// yield an id or a details fetch, even when an alias was applied.
+func TestEnrichRejectsUnrelatedTVHitWithNoYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "tv_search_unrelated.json")
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/tv":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "WWE Monday Night RAW", 0, 0, 0, true)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated TV hit")
+	}
+}
+
 func TestEnrichCachesConfigurationAndKeysByEpisode(t *testing.T) {
 	configBody := fixture(t, "configuration.json")
 	searchBody := fixture(t, "tv_search.json")

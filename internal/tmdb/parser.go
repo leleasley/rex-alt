@@ -13,10 +13,15 @@ var (
 	// Release groups suffix their tags with a hyphen (x264-GROUP, h265-ETHEL).
 	seasonEpisodeRE = regexp.MustCompile(`(?i)\bs(\d{1,3})e(\d{1,4})\b`)
 	// A season-only release carries a bare Sxx token with no episode number.
-	seasonOnlyRE    = regexp.MustCompile(`(?i)\bs\d{1,3}\b`)
-	yearRE          = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
-	bracketRE       = regexp.MustCompile(`\[[^]]*\]|\([^)]*\)`)
-	resolutionRE    = regexp.MustCompile(`^\d{3,4}[pi]$`)
+	seasonOnlyRE = regexp.MustCompile(`(?i)\bs\d{1,3}\b`)
+	yearRE       = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
+	// Daily shows (wrestling, news, talk) are released as "Show.Name.2026.11.23"
+	// with no SxxExx marker: that triplet is the episode air date, not the
+	// show's first-air year. Dots have become spaces by now, so dot, dash and
+	// space separators all match; month/day ranges reject non-date numbers.
+	tvAirDateRE  = regexp.MustCompile(`\b(?:19|20)\d{2}[ .-](?:0[1-9]|1[0-2])[ .-](?:0[1-9]|[12]\d|3[01])\b`)
+	bracketRE    = regexp.MustCompile(`\[[^]]*\]|\([^)]*\)`)
+	resolutionRE = regexp.MustCompile(`^\d{3,4}[pi]$`)
 
 	// Audio codecs arrive both dotted (DD5.1) and spaced (DD5 1, DTS HD MA).
 	// Dots have already become spaces by the time these run, so every pattern
@@ -62,8 +67,11 @@ var junkTokens = map[string]bool{
 // original capitalisation of the surviving title words is preserved.
 // For tv, the title ends at the first SxxExx marker because everything after
 // it is the episode-specific subtitle; a bare Sxx (season-only release) is
-// stripped too. A season/episode is reported only for a tv category; the
-// marker is stripped from movies as well so it cannot leak into their title.
+// stripped too. Without a marker, a trailing YYYY.MM.DD air date ends the
+// show name the same way because the date and all release tags after it are
+// episode-specific; it is never reported as the show's first-air year.
+// A season/episode is reported only for a tv category; the marker is stripped
+// from movies as well so it cannot leak into their title.
 func ParseRelease(name, category string) (title string, year int, season, episode int) {
 	base := path.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
 	if ext := strings.ToLower(path.Ext(base)); videoExtensions[ext] {
@@ -71,6 +79,7 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 	}
 	base = strings.NewReplacer(".", " ", "_", " ").Replace(base)
 
+	datedShow := false
 	if isTVCategory(category) {
 		if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
 			s, _ := strconv.Atoi(base[loc[2]:loc[3]])
@@ -79,8 +88,16 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 			// The tail is the episode title, not part of the show name. Keeping
 			// it would fail TMDB's strict normalised-title guard.
 			base = base[:loc[0]]
-		} else if loc := seasonOnlyRE.FindStringIndex(base); loc != nil {
-			base = base[:loc[0]] + " " + base[loc[1]:]
+		} else {
+			if loc := seasonOnlyRE.FindStringIndex(base); loc != nil {
+				base = base[:loc[0]] + " " + base[loc[1]:]
+			}
+			if loc := tvAirDateRE.FindStringIndex(base); loc != nil {
+				// Daily-show air date: truncate just like an episode marker so
+				// resolution/codec/group tags cannot leak into the show name.
+				base = base[:loc[0]]
+				datedShow = true
+			}
 		}
 	} else if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
 		// Movies never report a season/episode, but the marker must still be
@@ -89,11 +106,15 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 	}
 
 	// The last four-digit year is the release year: titles such as
-	// "Blade Runner 2049 2017" put the film's title number first.
-	if locs := yearRE.FindAllStringIndex(base, -1); len(locs) > 0 {
-		loc := locs[len(locs)-1]
-		year, _ = strconv.Atoi(base[loc[0]:loc[1]])
-		base = base[:loc[0]] + " " + base[loc[1]:]
+	// "Blade Runner 2049 2017" put the film's title number first. A dated
+	// daily show has no first-air year in the name, so its year stays 0 and
+	// the ±1 year gate does not reject the real (often much older) series.
+	if !datedShow {
+		if locs := yearRE.FindAllStringIndex(base, -1); len(locs) > 0 {
+			loc := locs[len(locs)-1]
+			year, _ = strconv.Atoi(base[loc[0]:loc[1]])
+			base = base[:loc[0]] + " " + base[loc[1]:]
+		}
 	}
 
 	base = stripAudioCodecs(base)
