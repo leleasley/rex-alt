@@ -187,6 +187,7 @@ Credentials always live in their own variables, never in a URL. See `.env.exampl
 | `PROBE_TIMEOUT` | `45s` | Probe timeout; minimum/default 45s for cold files. |
 | `HTTP_TIMEOUT` | `15s` | Per-request HTTP timeout. |
 | `SYNC_INTERVAL` | `6h` | Recurring sync interval. |
+| `ALTMOUNT_POLL_INTERVAL` | `5m` | Poll Altmount's catalogue for added/removed ids; one sync per detected change. `0` disables; non-zero minimum `30s`. |
 | `SYNC_START_HOUR` | `-1` | Hour 0–23 to start syncs, or `-1` for no gate. |
 | `SYNC_MAX_MOVIES` / `SYNC_MAX_SERIES` | `0` / `0` | Pilot caps; `0` means unlimited. |
 | `PUSH_BATCH` | `100` | Items per REX feed POST (large batches are split for REX's 16 MiB cap). |

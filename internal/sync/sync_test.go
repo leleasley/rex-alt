@@ -704,6 +704,115 @@ func TestItemIDIsStableAcrossSyncs(t *testing.T) {
 // Regression: caps limit the work set, never the catalogue used for Diff.
 // Lowering SYNC_MAX_MOVIES on a populated store must not trip Diff's
 // truncation guard or lose the rows above the cap.
+// seedCatalogue writes the current Altmount listing into the store without
+// running a sync, so HasChanges can be tested against a known baseline.
+func seedCatalogue(t *testing.T, st *store.Store, davURL string) []models.Entry {
+	t.Helper()
+	am := altmount.NewClient(davURL+"/webdav/", davUser, davPass, nil)
+	entries, err := am.List(context.Background(), "movies")
+	if err != nil {
+		t.Fatalf("seed listing movies: %v", err)
+	}
+	shows, err := am.List(context.Background(), "tv")
+	if err != nil {
+		t.Fatalf("seed listing tv: %v", err)
+	}
+	entries = append(entries, shows...)
+	if err := st.UpsertEntries(entries); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	return entries
+}
+
+func TestHasChangesDetectsAddedIDWithoutSideEffects(t *testing.T) {
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	dav.setFiles("movies", movieAlpha)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	rx := newREX(t, nil)
+	probed := false
+	prb := func(ctx context.Context, e models.Entry) (probe.Result, error) {
+		probed = true
+		return goodProbe(ctx, e)
+	}
+	svc := newService(t, testConfig(server.URL), st, server.URL, rx, prb)
+	seeded := seedCatalogue(t, st, server.URL)
+
+	if changed, err := svc.HasChanges(context.Background()); err != nil || changed {
+		t.Fatalf("unchanged catalogue: got changed=%v err=%v, want false, nil", changed, err)
+	}
+
+	dav.setFiles("movies", movieAlpha, movieBeta)
+	changed, err := svc.HasChanges(context.Background())
+	if err != nil {
+		t.Fatalf("HasChanges: %v", err)
+	}
+	if !changed {
+		t.Error("added id was not detected")
+	}
+	if probed {
+		t.Error("HasChanges must not probe")
+	}
+	registrations, _, pushes, deletes := rx.snapshot()
+	if registrations != 0 || len(pushes) != 0 || deletes != 0 {
+		t.Errorf("HasChanges caused REX traffic: registrations=%d pushes=%d deletes=%d", registrations, len(pushes), deletes)
+	}
+	entries, err := st.Entries()
+	if err != nil || len(entries) != len(seeded) {
+		t.Errorf("HasChanges mutated the store: entries=%d (%v), want %d", len(entries), err, len(seeded))
+	}
+}
+
+func TestHasChangesDetectsRemovedID(t *testing.T) {
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	dav.setFiles("movies", movieAlpha, movieBeta)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	rx := newREX(t, nil)
+	svc := newService(t, testConfig(server.URL), st, server.URL, rx, goodProbe)
+	seeded := seedCatalogue(t, st, server.URL)
+
+	dav.setFiles("movies", movieAlpha)
+	changed, err := svc.HasChanges(context.Background())
+	if err != nil {
+		t.Fatalf("HasChanges: %v", err)
+	}
+	if !changed {
+		t.Error("removed id was not detected")
+	}
+	entries, err := st.Entries()
+	if err != nil || len(entries) != len(seeded) {
+		t.Errorf("HasChanges mutated the store: entries=%d (%v), want %d", len(entries), err, len(seeded))
+	}
+}
+
+func TestHasChangesRefusesEmptyListing(t *testing.T) {
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	dav.setFiles("movies", movieAlpha)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	rx := newREX(t, nil)
+	svc := newService(t, testConfig(server.URL), st, server.URL, rx, goodProbe)
+	seeded := seedCatalogue(t, st, server.URL)
+
+	dav.setFiles("movies")
+	dav.setFiles("tv")
+	changed, err := svc.HasChanges(context.Background())
+	if err == nil {
+		t.Fatalf("empty listing: got changed=%v err=nil, want an error", changed)
+	}
+	if changed {
+		t.Error("empty listing must not report that everything was removed")
+	}
+	entries, err2 := st.Entries()
+	if err2 != nil || len(entries) != len(seeded) {
+		t.Errorf("HasChanges mutated the store: entries=%d (%v), want %d", len(entries), err2, len(seeded))
+	}
+}
+
 func TestSyncOnceCapLoweringKeepsFullCatalogue(t *testing.T) {
 	const (
 		total = 30

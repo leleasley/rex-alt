@@ -27,6 +27,7 @@ var envKeys = []string{
 	"ALTMOUNT_WEBDAV_PASSWORD",
 	"ALTMOUNT_USER",
 	"ALTMOUNT_PASSWORD",
+	"ALTMOUNT_POLL_INTERVAL",
 	"TMDB_READ_ACCESS_TOKEN",
 	"TMDB_READ_TOKEN",
 	"TMDB_API_KEY",
@@ -74,6 +75,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.SyncInterval != 6*time.Hour {
 		t.Errorf("SyncInterval: got %s, want 6h", cfg.SyncInterval)
+	}
+	if cfg.AltmountPollInterval != 5*time.Minute {
+		t.Errorf("AltmountPollInterval: got %s, want 5m", cfg.AltmountPollInterval)
 	}
 	if cfg.DatabasePath != "/data/rex-alt.db" {
 		t.Errorf("DatabasePath: got %q, want /data/rex-alt.db", cfg.DatabasePath)
@@ -150,6 +154,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"sync start hour too low", "SYNC_START_HOUR", "-2"},
 		{"sync max movies negative", "SYNC_MAX_MOVIES", "-1"},
 		{"sync max series negative", "SYNC_MAX_SERIES", "-1"},
+		{"poll interval below floor", "ALTMOUNT_POLL_INTERVAL", "29s"},
+		{"poll interval negative", "ALTMOUNT_POLL_INTERVAL", "-1m"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,12 +175,28 @@ func TestLoadAcceptsBoundaryValues(t *testing.T) {
 	t.Setenv("PROBE_WORKERS", "8")
 	t.Setenv("PROBE_TIMEOUT", "45s")
 	t.Setenv("SYNC_START_HOUR", "0")
+	t.Setenv("ALTMOUNT_POLL_INTERVAL", "30s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load at boundaries: %v", err)
 	}
 	if cfg.ProbeWorkers != 8 || cfg.ProbeTimeout != 45*time.Second {
 		t.Errorf("boundaries: got workers=%d timeout=%s", cfg.ProbeWorkers, cfg.ProbeTimeout)
+	}
+	if cfg.AltmountPollInterval != 30*time.Second {
+		t.Errorf("AltmountPollInterval: got %s, want 30s", cfg.AltmountPollInterval)
+	}
+}
+
+func TestLoadAllowsDisablingAltmountPoll(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ALTMOUNT_POLL_INTERVAL", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with polling disabled: %v", err)
+	}
+	if cfg.AltmountPollInterval != 0 {
+		t.Errorf("AltmountPollInterval: got %s, want 0 (disabled)", cfg.AltmountPollInterval)
 	}
 }
 
@@ -194,6 +216,7 @@ func TestLoadReadsEnv(t *testing.T) {
 		"ALTMOUNT_WEBDAV_URL":      "http://10.77.77.49:8090/webdav/",
 		"ALTMOUNT_WEBDAV_USER":     "davuser",
 		"ALTMOUNT_WEBDAV_PASSWORD": "davpass",
+		"ALTMOUNT_POLL_INTERVAL":   "2m",
 		"TMDB_READ_ACCESS_TOKEN":   "tmdbreadtoken",
 		"TMDB_API_KEY":             "tmdbapikey",
 		"PROBE_WORKERS":            "6",
@@ -232,6 +255,9 @@ func TestLoadReadsEnv(t *testing.T) {
 	}
 	if cfg.AltmountWebDAVURL != vals["ALTMOUNT_WEBDAV_URL"] || cfg.AltmountUser != "davuser" || cfg.AltmountPassword != "davpass" {
 		t.Errorf("altmount fields: %+v", cfg)
+	}
+	if cfg.AltmountPollInterval != 2*time.Minute {
+		t.Errorf("AltmountPollInterval: got %s, want 2m", cfg.AltmountPollInterval)
 	}
 	if cfg.TMDBReadToken != "tmdbreadtoken" || cfg.TMDBAPIKey != "tmdbapikey" {
 		t.Errorf("tmdb fields: %+v", cfg)

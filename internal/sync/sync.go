@@ -277,6 +277,53 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// HasChanges reports whether the Altmount catalogue's set of entry ids differs
+// from the ids already stored. It deliberately does no TMDB lookup, probe,
+// registration or REX call and never writes to the store: the watcher uses it
+// only to decide whether one full SyncOnce pass is worth running. Like Diff,
+// it refuses an empty listing so a truncated PROPFIND cannot look like every
+// entry being removed.
+func (s *Service) HasChanges(ctx context.Context) (bool, error) {
+	movies, err := s.dav.List(ctx, "movies")
+	if err != nil {
+		return false, fmt.Errorf("sync: list movies: %w", err)
+	}
+	shows, err := s.dav.List(ctx, "tv")
+	if err != nil {
+		return false, fmt.Errorf("sync: list tv: %w", err)
+	}
+	if len(movies)+len(shows) == 0 {
+		return false, fmt.Errorf("sync: refusing empty catalogue; possible truncated PROPFIND response")
+	}
+
+	current := make(map[string]struct{}, len(movies)+len(shows))
+	for _, e := range movies {
+		current[e.ID] = struct{}{}
+	}
+	for _, e := range shows {
+		current[e.ID] = struct{}{}
+	}
+	known, err := s.db.Entries()
+	if err != nil {
+		return false, fmt.Errorf("sync: read catalogue: %w", err)
+	}
+	stored := make(map[string]struct{}, len(known))
+	for _, e := range known {
+		stored[e.ID] = struct{}{}
+	}
+	for id := range current {
+		if _, found := stored[id]; !found {
+			return true, nil
+		}
+	}
+	for id := range stored {
+		if _, found := current[id]; !found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // register sends the source definition once. The directory names match the
 // first segment of library.ItemPath ("movies"/"tv"): a different name would
 // make REX place the items in a library it cannot reach. The library titles

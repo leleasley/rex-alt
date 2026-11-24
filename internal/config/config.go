@@ -15,48 +15,51 @@ import (
 )
 
 const (
-	defaultAppPort      = 9982
-	defaultDatabasePath = "/data/rex-alt.db"
-	defaultSourceName   = "rex-alt"
-	defaultProbeWorkers = 4
-	maxProbeWorkers     = 8
-	defaultProbeTimeout = 45 * time.Second
-	defaultHTTPTimeout  = 15 * time.Second
-	defaultSyncInterval = 6 * time.Hour
-	defaultPushBatch    = 100
-	defaultLogLevel     = "info"
-	minAPITokenLength   = 16
-	encryptionKeyBytes  = 32
-	redactionMarker     = "***"
+	defaultAppPort              = 9982
+	defaultDatabasePath         = "/data/rex-alt.db"
+	defaultSourceName           = "rex-alt"
+	defaultProbeWorkers         = 4
+	maxProbeWorkers             = 8
+	defaultProbeTimeout         = 45 * time.Second
+	defaultHTTPTimeout          = 15 * time.Second
+	defaultSyncInterval         = 6 * time.Hour
+	defaultAltmountPollInterval = 5 * time.Minute
+	minAltmountPollInterval     = 30 * time.Second
+	defaultPushBatch            = 100
+	defaultLogLevel             = "info"
+	minAPITokenLength           = 16
+	encryptionKeyBytes          = 32
+	redactionMarker             = "***"
 )
 
 // Config is the complete, validated runtime configuration. Later packages
 // consume these exact field names. Load is the only constructor.
 type Config struct {
-	AppPort           int
-	PublicURL         string
-	DatabasePath      string
-	APIToken          string
-	EncryptionKey     []byte
-	RexURL            string
-	RexSourceName     string
-	RexSourceUser     string
-	RexSourcePassword string
-	RexSendTMDBIDs    bool
-	AltmountWebDAVURL string
-	AltmountUser      string
-	AltmountPassword  string
-	TMDBReadToken     string
-	TMDBAPIKey        string
-	ProbeWorkers      int
-	ProbeTimeout      time.Duration
-	HTTPTimeout       time.Duration
-	SyncInterval      time.Duration
-	SyncStartHour     int
-	SyncMaxMovies     int
-	SyncMaxSeries     int
-	PushBatch         int
-	LogLevel          string
+	AppPort              int
+	PublicURL            string
+	DatabasePath         string
+	APIToken             string
+	EncryptionKey        []byte
+	RexURL               string
+	RexSourceName        string
+	RexSourceUser        string
+	RexSourcePassword    string
+	RexSendTMDBIDs       bool
+	AltmountWebDAVURL    string
+	AltmountUser         string
+	AltmountPassword     string
+	TMDBReadToken        string
+	TMDBAPIKey           string
+	ProbeWorkers         int
+	ProbeTimeout         time.Duration
+	HTTPTimeout          time.Duration
+	SyncInterval         time.Duration
+	AltmountPollInterval time.Duration
+	SyncStartHour        int
+	SyncMaxMovies        int
+	SyncMaxSeries        int
+	PushBatch            int
+	LogLevel             string
 }
 
 // secretFields are the Config fields whose values must never be printed.
@@ -76,16 +79,17 @@ var secretFields = []string{
 // Error messages name the variable but never include its value.
 func Load() (Config, error) {
 	cfg := Config{
-		AppPort:       defaultAppPort,
-		DatabasePath:  defaultDatabasePath,
-		RexSourceName: defaultSourceName,
-		ProbeWorkers:  defaultProbeWorkers,
-		ProbeTimeout:  defaultProbeTimeout,
-		HTTPTimeout:   defaultHTTPTimeout,
-		SyncInterval:  defaultSyncInterval,
-		SyncStartHour: -1, // -1 disables the start-hour gate
-		PushBatch:     defaultPushBatch,
-		LogLevel:      defaultLogLevel,
+		AppPort:              defaultAppPort,
+		DatabasePath:         defaultDatabasePath,
+		RexSourceName:        defaultSourceName,
+		ProbeWorkers:         defaultProbeWorkers,
+		ProbeTimeout:         defaultProbeTimeout,
+		HTTPTimeout:          defaultHTTPTimeout,
+		SyncInterval:         defaultSyncInterval,
+		AltmountPollInterval: defaultAltmountPollInterval,
+		SyncStartHour:        -1, // -1 disables the start-hour gate
+		PushBatch:            defaultPushBatch,
+		LogLevel:             defaultLogLevel,
 	}
 
 	var err error
@@ -128,6 +132,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SyncInterval, err = durationEnv("SYNC_INTERVAL", cfg.SyncInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.AltmountPollInterval, err = durationEnv("ALTMOUNT_POLL_INTERVAL", cfg.AltmountPollInterval); err != nil {
 		return Config{}, err
 	}
 	if cfg.SyncStartHour, err = intEnv("SYNC_START_HOUR", cfg.SyncStartHour); err != nil {
@@ -177,6 +184,11 @@ func (c Config) validate() error {
 	}
 	if c.SyncInterval <= 0 {
 		return fmt.Errorf("config: SYNC_INTERVAL must be positive")
+	}
+	// Zero turns the cheap catalogue-change watcher off; any other value must
+	// be long enough that PROPFIND polling stays cheap.
+	if c.AltmountPollInterval < 0 || (c.AltmountPollInterval > 0 && c.AltmountPollInterval < minAltmountPollInterval) {
+		return fmt.Errorf("config: ALTMOUNT_POLL_INTERVAL must be 0 (disabled) or at least %s", minAltmountPollInterval)
 	}
 	if c.SyncStartHour < -1 || c.SyncStartHour > 23 {
 		return fmt.Errorf("config: SYNC_START_HOUR must be -1 or between 0 and 23")

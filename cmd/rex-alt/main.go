@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,14 @@ const (
 	serverTimeout   = 15 * time.Second
 	shutdownTimeout = 15 * time.Second
 )
+
+// syncRunner is the slice of sync.Service used by the background loops. It
+// keeps the scheduler and the change watcher testable without a live WebDAV or
+// REX server.
+type syncRunner interface {
+	HasChanges(context.Context) (bool, error)
+	SyncOnce(context.Context) (sync.Stats, error)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -76,7 +85,14 @@ func run() error {
 	// is performed exactly once inside SyncOnce. The loop's first pass runs
 	// immediately in the background, so registration does not delay the health
 	// endpoint; transient failures are logged and retried on the next tick.
-	go runSyncLoop(ctx, svc, cfg.SyncInterval, cfg.SyncStartHour)
+	// The scheduled loop and the cheap change watcher share one guard so a
+	// tick arriving during a pass is dropped instead of queued. SyncOnce's
+	// own mutex still serialises a POST /sync with either loop.
+	var syncing atomic.Bool
+	go runSyncLoop(ctx, svc, cfg.SyncInterval, cfg.SyncStartHour, &syncing)
+	if cfg.AltmountPollInterval > 0 {
+		go runWatchLoop(ctx, svc, cfg.AltmountPollInterval, &syncing)
+	}
 
 	// 5. Admin API. APP_HOST is intentionally read here: Config's authoritative
 	// field list has no host field, while APP_PORT flows through cfg.AppPort.
@@ -119,7 +135,7 @@ func run() error {
 // runSyncLoop performs one pass immediately, then waits interval between
 // passes. When SYNC_START_HOUR is set, a pass outside that local hour is
 // deferred in hour-sized steps so a coarse interval cannot skip the window.
-func runSyncLoop(ctx context.Context, svc *sync.Service, interval time.Duration, startHour int) {
+func runSyncLoop(ctx context.Context, svc syncRunner, interval time.Duration, startHour int, syncing *atomic.Bool) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -129,13 +145,48 @@ func runSyncLoop(ctx context.Context, svc *sync.Service, interval time.Duration,
 		case <-timer.C:
 			now := time.Now()
 			if syncDue(now, startHour) {
-				if _, err := svc.SyncOnce(ctx); err != nil {
-					log.Printf("scheduled sync failed: %v", err)
-				}
+				trySync(ctx, syncing, svc)
 				timer.Reset(interval)
 			} else {
 				log.Printf("scheduled sync deferred until SYNC_START_HOUR=%d (local hour %d)", startHour, now.Hour())
 				timer.Reset(retryDelay(interval))
+			}
+		}
+	}
+}
+
+// trySync claims the shared guard for one pass. A tick that arrives while a
+// pass is already running is dropped: SyncOnce's mutex would only queue it for
+// a duplicate pass once the current one finishes.
+func trySync(ctx context.Context, syncing *atomic.Bool, svc syncRunner) bool {
+	if !syncing.CompareAndSwap(false, true) {
+		return false
+	}
+	defer syncing.Store(false)
+	if _, err := svc.SyncOnce(ctx); err != nil {
+		log.Printf("sync failed: %v", err)
+	}
+	return true
+}
+
+// runWatchLoop polls Altmount's catalogue on a cheap interval and triggers one
+// full sync when an entry id was added or removed. HasChanges only lists the
+// two WebDAV categories and compares ids; it never probes, registers or pushes.
+func runWatchLoop(ctx context.Context, svc syncRunner, interval time.Duration, syncing *atomic.Bool) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			changed, err := svc.HasChanges(ctx)
+			if err != nil {
+				log.Printf("altmount change check failed: %v", err)
+				continue
+			}
+			if changed {
+				trySync(ctx, syncing, svc)
 			}
 		}
 	}
