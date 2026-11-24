@@ -29,7 +29,18 @@ const (
 	maxResponseBytes = 1 << 20
 	defaultTimeout   = 15 * time.Second
 	maxRetryWait     = 2 * time.Second
+	// Only the first page's leading hits are considered: later results grow
+	// rapidly less relevant, and scoring more results raises wrong-id risk.
+	maxSearchResults = 5
+	// Conservative Dice threshold. Residual release junk lowers a genuine
+	// match to roughly 0.7; unrelated films score far below this.
+	minTitleScore = 0.6
 )
+
+// scoringApostrophes is used only by the match scorer: TMDB writes "Patch's"
+// while a parsed release name often reads "Patchs". The cache-key normaliser
+// is deliberately left untouched.
+var scoringApostrophes = strings.NewReplacer("'", "", "\u2019", "")
 
 // Client resolves release metadata against TMDB. The read token (v4 bearer) is
 // preferred; a v3 API key is used only when no read token is configured. Both
@@ -61,11 +72,12 @@ func NewClient(readToken, apiKey string, cache *store.Store, h *http.Client) *Cl
 }
 
 // Enrich returns the best metadata for a release and reports whether it was
-// accepted. A top search hit is accepted only when its normalised title
-// matches and its year is within one of the requested year (when one was
-// supplied); an ambiguous or mismatched hit yields ok=false and no id, so an
-// unrelated TMDB id can never be attached to a file. Successful results are
-// cached in SQLite under the normalised title|year|isShow|season|episode key.
+// accepted. The first maxSearchResults hits are scored by normalised token
+// overlap, and the best hit is accepted only when it clears minTitleScore and
+// (when a year was parsed) carries a year within one of it. An ambiguous or
+// mismatched hit yields ok=false and no id, so an unrelated TMDB id can never
+// be attached to a file. Successful results are cached in SQLite under the
+// normalised title|year|isShow|season|episode key.
 func (c *Client) Enrich(ctx context.Context, title string, year, season, episode int, isShow bool) (models.Enriched, bool, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -102,10 +114,14 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 		if len(results.Results) == 0 {
 			return models.Enriched{}, false, nil
 		}
-		top := results.Results[0]
-		if !hitMatches(top.Name, top.FirstAirDate, title, year) {
+		idx := bestHitIndex(results.Results,
+			func(r searchResult) string { return r.Name },
+			func(r searchResult) string { return r.FirstAirDate },
+			title, year)
+		if idx < 0 {
 			return models.Enriched{}, false, nil
 		}
+		top := results.Results[idx]
 		en.TMDBID = top.ID
 		en.ShowTitle = top.Name
 		en.Title = top.Name
@@ -153,10 +169,14 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 		if len(results.Results) == 0 {
 			return models.Enriched{}, false, nil
 		}
-		top := results.Results[0]
-		if !hitMatches(top.Title, top.ReleaseDate, title, year) {
+		idx := bestHitIndex(results.Results,
+			func(r searchResult) string { return r.Title },
+			func(r searchResult) string { return r.ReleaseDate },
+			title, year)
+		if idx < 0 {
 			return models.Enriched{}, false, nil
 		}
+		top := results.Results[idx]
 		en.TMDBID = top.ID
 		en.Title = top.Title
 		en.Summary = top.Overview
@@ -210,14 +230,75 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 	return en, true, nil
 }
 
-// hitMatches is the guard against attaching a wrong TMDB id: the normalised
-// titles must be equal, and when a year was requested the hit must carry a
-// year within one of it. A requested year with a missing hit year is treated
-// as ambiguous and rejected.
-func hitMatches(hitTitle, hitDate, wantTitle string, wantYear int) bool {
-	if normalizeTitle(hitTitle) != normalizeTitle(wantTitle) {
-		return false
+// bestHitIndex picks the index of the best eligible hit among the first
+// maxSearchResults results, or -1 when no result clears both guards. The year
+// is a hard eligibility gate: when a year was parsed, a hit with a missing or
+// out-of-range year is skipped before scoring, so a wrong-year lookalike can
+// never displace the right film or trigger a wrong-id attach. Higher scores
+// win; ties keep the higher-ranked result, except that an exact normalised
+// title match (score 1.0) wins a tie as required.
+func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle string, wantYear int) int {
+	limit := len(results)
+	if limit > maxSearchResults {
+		limit = maxSearchResults
 	}
+	exact := normalizeTitle(wantTitle)
+	best, bestScore, bestExact := -1, -1.0, false
+	for i := 0; i < limit; i++ {
+		hit := results[i]
+		if !yearAllowed(dateOf(hit), wantYear) {
+			continue
+		}
+		hitTitle := titleOf(hit)
+		score := titleScore(wantTitle, hitTitle)
+		isExact := normalizeTitle(hitTitle) == exact
+		if score > bestScore || (score == bestScore && isExact && !bestExact) {
+			best, bestScore, bestExact = i, score, isExact
+		}
+	}
+	if bestScore < minTitleScore {
+		return -1
+	}
+	return best
+}
+
+// titleScore returns the Dice coefficient of two titles' word tokens (0..1):
+// twice the shared token count divided by the total token count. Comparing
+// token multisets instead of whole strings lets residual release junk ("AVC",
+// "X 265-EVO", "-UnKn0wn") coexist with the real title, while unrelated films
+// still score near zero and can never be accepted. An exact normalised match
+// scores 1.0.
+func titleScore(want, got string) float64 {
+	a, b := titleTokens(want), titleTokens(got)
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	counts := make(map[string]int, len(a))
+	for _, token := range a {
+		counts[token]++
+	}
+	shared := 0
+	for _, token := range b {
+		if counts[token] > 0 {
+			counts[token]--
+			shared++
+		}
+	}
+	return float64(2*shared) / float64(len(a)+len(b))
+}
+
+// titleTokens is the scoring-only normalisation: apostrophes are deleted
+// rather than split into word separators, so TMDB's "Patch's" matches the
+// parsed release name's "Patchs". normalizeTitle (and therefore the cache
+// key) is deliberately unchanged.
+func titleTokens(s string) []string {
+	return strings.Fields(normalizeTitle(scoringApostrophes.Replace(s)))
+}
+
+// yearAllowed applies the pinned ±1 year guard. A requested year with a
+// missing hit year is ambiguous and rejected; with no requested year every
+// hit remains eligible.
+func yearAllowed(hitDate string, wantYear int) bool {
 	if wantYear <= 0 {
 		return true
 	}

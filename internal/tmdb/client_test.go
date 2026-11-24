@@ -2,6 +2,7 @@ package tmdb
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/leleasley/rex-alt/internal/models"
 	"github.com/leleasley/rex-alt/internal/store"
 )
 
@@ -318,6 +320,222 @@ func TestEnrichRejectsMismatchedTitle(t *testing.T) {
 	defer mu.Unlock()
 	if fetched {
 		t.Error("client fetched details for a mismatched title")
+	}
+}
+
+// The parser leaves residual release junk in these real-world titles
+// ("AVC", "X 265-EVO", "-UnKn0wn", and "2" where TMDB uses "II"). The old
+// exact-normalised-title guard rejected all of them, so Plex showed the raw
+// filename. Each fake response puts the correct hit below rank 1 and includes
+// decoys, including near matches that must not outscore it.
+func TestEnrichResolvesNoisyMovieTitles(t *testing.T) {
+	cases := []struct {
+		name      string
+		search    string
+		title     string
+		year      int
+		wantID    int
+		wantTitle string
+		wantDate  string
+	}{
+		{
+			name:      "roman numeral and stray AVC",
+			search:    "movie_search_dalmatians.json",
+			title:     "101 Dalmatians 2 Patchs London Adventure AVC",
+			year:      2003,
+			wantID:    9102,
+			wantTitle: "101 Dalmatians II: Patch's London Adventure",
+			wantDate:  "2003-01-21",
+		},
+		{
+			name:      "codec tail after repeated title word",
+			search:    "movie_search_christmas.json",
+			title:     "A Christmas Story Christmas X 265-EVO",
+			year:      2022,
+			wantID:    9203,
+			wantTitle: "A Christmas Story Christmas",
+			wantDate:  "2022-11-17",
+		},
+		{
+			name:      "upload group suffix",
+			search:    "movie_search_wounded_fawn.json",
+			title:     "A Wounded Fawn AVC -UnKn0wn",
+			year:      2022,
+			wantID:    9303,
+			wantTitle: "A Wounded Fawn",
+			wantDate:  "2022-09-16",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			searchBody := fixture(t, tc.search)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.wantID)
+			detailsBody := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,`+
+					`"overview":"Scored match overview.",`+
+					`"poster_path":"/scored-poster.jpg","backdrop_path":"/scored-backdrop.jpg"}`,
+				tc.wantID, tc.wantID, tc.wantTitle, tc.wantDate)
+
+			var mu sync.Mutex
+			var detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					writeJSON(w, searchBody)
+				case wantDetails:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					writeJSON(w, detailsBody)
+				default:
+					// Any details fetch for a decoy id is a wrong-id attach.
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, tc.year, 0, 0, false)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q; want TMDB id %d", tc.title, tc.wantID)
+			}
+			if en.TMDBID != tc.wantID {
+				t.Errorf("TMDBID = %d, want %d", en.TMDBID, tc.wantID)
+			}
+			if en.Title != tc.wantTitle {
+				t.Errorf("Title = %q, want the corrected TMDB title %q", en.Title, tc.wantTitle)
+			}
+			if en.Date != tc.wantDate {
+				t.Errorf("Date = %q, want %q", en.Date, tc.wantDate)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// Pin the wrong-id guard: an unrelated top hit and a low-scoring follower must
+// never produce an id or a details request, even when years line up.
+func TestEnrichRejectsUnrelatedTopHit(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "movie_search_unrelated_top.json")
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Swallowed", 2022, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated hit")
+	}
+}
+
+func TestTitleScoreNoisyTitlesClearThreshold(t *testing.T) {
+	cases := []struct {
+		name, want, got string
+		lo, hi          float64
+	}{
+		{"exact normalized match", "A Wounded Fawn", "A Wounded Fawn", 1, 1},
+		{"roman numeral and possessive", "101 Dalmatians 2 Patchs London Adventure AVC", "101 Dalmatians II: Patch's London Adventure", 0.75, 0.80},
+		{"codec tail", "A Christmas Story Christmas X 265-EVO", "A Christmas Story Christmas", 0.70, 0.75},
+		{"upload group suffix", "A Wounded Fawn AVC -UnKn0wn", "A Wounded Fawn", 0.74, 0.76},
+		{"unrelated", "Swallowed", "A Completely Different Film", 0, 0},
+		{"near miss below threshold", "Swallowed", "Swallowed By The Earth", 0.39, 0.41},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := titleScore(tc.want, tc.got)
+			if got < tc.lo || got > tc.hi {
+				t.Errorf("titleScore(%q, %q) = %.4f, want between %.4f and %.4f",
+					tc.want, tc.got, got, tc.lo, tc.hi)
+			}
+			if got >= 1 && normalizeTitle(tc.want) != normalizeTitle(tc.got) {
+				t.Errorf("non-exact pair scored 1.0: %q / %q", tc.want, tc.got)
+			}
+		})
+	}
+}
+
+func TestBestHitIndexGuardsAndTieBreaks(t *testing.T) {
+	type hit struct{ title, date string }
+	titleOf := func(h hit) string { return h.title }
+	dateOf := func(h hit) string { return h.date }
+	unrelated := hit{title: "Completely Different Film", date: "2022-01-01"}
+
+	cases := []struct {
+		name    string
+		results []hit
+		want    string
+		year    int
+		index   int
+	}{
+		{
+			name:    "rank five is examined",
+			results: []hit{unrelated, unrelated, unrelated, unrelated, {title: "A Wounded Fawn", date: "2022-09-16"}},
+			want:    "A Wounded Fawn", year: 2022, index: 4,
+		},
+		{
+			name:    "rank six is out of scope",
+			results: []hit{unrelated, unrelated, unrelated, unrelated, unrelated, {title: "A Wounded Fawn", date: "2022-09-16"}},
+			want:    "A Wounded Fawn", year: 2022, index: -1,
+		},
+		{
+			name:    "exact normalized match wins a score tie",
+			results: []hit{{title: "Fawn A Wounded", date: "2022-01-01"}, {title: "A Wounded Fawn", date: "2022-09-16"}},
+			want:    "A Wounded Fawn", year: 2022, index: 1,
+		},
+		{
+			name:    "wrong-year lookalike is skipped",
+			results: []hit{{title: "A Wounded Fawn", date: "2019-01-01"}, {title: "A Wounded Fawn", date: "2022-09-16"}},
+			want:    "A Wounded Fawn", year: 2022, index: 1,
+		},
+		{
+			name:    "all hits wrong year",
+			results: []hit{{title: "A Wounded Fawn", date: "2019-01-01"}},
+			want:    "A Wounded Fawn", year: 2022, index: -1,
+		},
+		{
+			name:    "no year requested accepts a missing date",
+			results: []hit{{title: "A Wounded Fawn", date: ""}},
+			want:    "A Wounded Fawn", year: 0, index: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bestHitIndex(tc.results, titleOf, dateOf, tc.want, tc.year); got != tc.index {
+				t.Errorf("bestHitIndex = %d, want %d", got, tc.index)
+			}
+		})
 	}
 }
 

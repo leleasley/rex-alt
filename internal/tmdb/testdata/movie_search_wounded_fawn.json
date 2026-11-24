@@ -1,0 +1,30 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "id": 9301,
+      "title": "A Wounded Fawn",
+      "release_date": "2019-01-01"
+    },
+    {
+      "id": 9302,
+      "title": "The Wounded",
+      "release_date": "2022-06-01"
+    },
+    {
+      "id": 9303,
+      "title": "A Wounded Fawn",
+      "release_date": "2022-09-16",
+      "overview": "A weekend in the woods takes a turn.",
+      "poster_path": "/fawn-poster.jpg",
+      "backdrop_path": "/fawn-backdrop.jpg"
+    },
+    {
+      "id": 9304,
+      "title": "Bone Tomahawk",
+      "release_date": "2015-10-01"
+    }
+  ],
+  "total_results": 4,
+  "total_pages": 1
+}
