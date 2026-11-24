@@ -248,3 +248,28 @@ curl -sS -o /dev/null -w '%{http_code}\n' -u "<REX source user>:<REX source pass
 | Existing stack unchanged | `____` |
 | Full uncapped pass off-peak | `____` |
 | Notes / concerns | `____` |
+
+## Live verification results (controller, 2026-11-24, image v0.1.4)
+
+These are the observed values from the one-file/pilot spike on the real stack.
+The blank fields above are a template for a fresh deployment; this section is
+the record of this one.
+
+| Check | Result |
+| --- | --- |
+| REX `allowMediaDeletion` before registration | `value="1"`; set to `0` via `PUT /:/prefs?allowMediaDeletion=0`, read back `value="0"` |
+| Source registration | `GET /rex/sources/rex-alt` → `url=http://10.77.77.49:8090/webdav`, `auth=basic`, `mount=/altmount`, dirs `movies`→`Altmount Movies` and `tv`→`Altmount TV`, `trash=false`, `features=["probe_digest"]` |
+| Enumeration | 621 entries stored (movies + tv); TMDB cache 28 entries after parser fix |
+| Pilot caps | `SYNC_MAX_MOVIES=1`, `SYNC_MAX_SERIES=2` → 3 probes cached, 3 REX feed items, 0 held |
+| REX feed | `GET /rex/feed/rex-alt/items` → `size=3`; `GET /rex/feed/rex-alt/held` → `size=0` |
+| Plex libraries | `Altmount TV` created; Altmount movie is merged into the existing `Debrid Movies` row because REX shares a library when two sources declare the same directory name (`movies`). `mount` alone does not separate it. |
+| TMDB identification | With `REX_SEND_TMDB_IDS=true`, the movie resolves to Plex's `10 Cloverfield Lane` (ratingKey 159373) as a second version of the Zurg row. With ids off it used the filename as the title. |
+| Byte playback | `GET /library/parts/1637000/file` with `Range: bytes=0-2047` → `206 Partial Content`, `Content-Range: bytes 0-2047/6865184334` (REX → Altmount WebDAV) |
+| Delete safety | `DELETE /library/metadata/163701` → HTTP 403; Altmount `file_health` 398 → 398; REX feed items still 3 |
+| Resource use | `docker stats rex-alt --no-stream` → 0.00% CPU, 8.863 MiB / 512 MiB (1.73%) |
+| Additive check | Zurg source unchanged; host/Radarr/Sonarr `__magic__/__all__` counts all 0 and Zurg logs clean; no media bytes written; no changes under `/opt/media-stack` or `/opt/altmount` |
+
+Notes for future operators:
+- `REX_SOURCE_USER` / `REX_SOURCE_PASSWORD` MUST be the Altmount WebDAV credentials, not arbitrary values: REX uses them to fetch bytes. Using placeholders causes upstream 401 on playback.
+- Altmount rejects WebDAV `Depth: 2` with HTTP 400; the add-on sends `Depth: infinity`.
+- A Plex delete is refused because `allowMediaDeletion=0`; keep it off while this source is registered.
