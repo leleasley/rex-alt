@@ -11,7 +11,9 @@ import (
 
 var (
 	// Release groups suffix their tags with a hyphen (x264-GROUP, h265-ETHEL).
-	seasonEpisodeRE = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,4})\b`)
+	seasonEpisodeRE = regexp.MustCompile(`(?i)\bs(\d{1,3})e(\d{1,4})\b`)
+	// A season-only release carries a bare Sxx token with no episode number.
+	seasonOnlyRE    = regexp.MustCompile(`(?i)\bs\d{1,3}\b`)
 	yearRE          = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
 	bracketRE       = regexp.MustCompile(`\[[^]]*\]|\([^)]*\)`)
 	resolutionRE    = regexp.MustCompile(`^\d{3,4}[pi]$`)
@@ -58,8 +60,10 @@ var junkTokens = map[string]bool{
 // Dots and underscores become spaces; extension, bracketed group tags,
 // quality/source/codec tokens and the year or SxxExx marker are removed. The
 // original capitalisation of the surviving title words is preserved.
-// A season/episode is only reported for a tv category; the marker is stripped
-// from movies too so it cannot leak into their title.
+// For tv, the title ends at the first SxxExx marker because everything after
+// it is the episode-specific subtitle; a bare Sxx (season-only release) is
+// stripped too. A season/episode is reported only for a tv category; the
+// marker is stripped from movies as well so it cannot leak into their title.
 func ParseRelease(name, category string) (title string, year int, season, episode int) {
 	base := path.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
 	if ext := strings.ToLower(path.Ext(base)); videoExtensions[ext] {
@@ -67,13 +71,20 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 	}
 	base = strings.NewReplacer(".", " ", "_", " ").Replace(base)
 
-	// The S/E marker is removed for every category, but only reported for tv.
-	if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
-		s, _ := strconv.Atoi(base[loc[2]:loc[3]])
-		e, _ := strconv.Atoi(base[loc[4]:loc[5]])
-		if isTVCategory(category) {
+	if isTVCategory(category) {
+		if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
+			s, _ := strconv.Atoi(base[loc[2]:loc[3]])
+			e, _ := strconv.Atoi(base[loc[4]:loc[5]])
 			season, episode = s, e
+			// The tail is the episode title, not part of the show name. Keeping
+			// it would fail TMDB's strict normalised-title guard.
+			base = base[:loc[0]]
+		} else if loc := seasonOnlyRE.FindStringIndex(base); loc != nil {
+			base = base[:loc[0]] + " " + base[loc[1]:]
 		}
+	} else if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
+		// Movies never report a season/episode, but the marker must still be
+		// removed so it cannot leak into the title.
 		base = base[:loc[0]] + " " + base[loc[1]:]
 	}
 

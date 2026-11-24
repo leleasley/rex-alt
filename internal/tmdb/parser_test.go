@@ -131,3 +131,77 @@ func TestParseReleaseDoesNotReadSeasonFromMovieName(t *testing.T) {
 		t.Errorf("got year=%d season=%d episode=%d, want 2022/0/0", year, season, ep)
 	}
 }
+
+// Live-discovered root cause: everything after the SxxExx marker is the
+// episode-specific subtitle, not part of the show name. Keeping it makes the
+// TMDB normalised-title guard reject the hit, so these episodes get no ids or
+// artwork. The title must stop at the marker and the marker must be reported.
+func TestParseReleaseTVEpisodeTitleStopsAtMarker(t *testing.T) {
+	cases := []struct {
+		name       string
+		wantTitle  string
+		wantSeason int
+		wantEp     int
+	}{
+		{
+			name:       "12.12.12.S01E01.Im.Robbing.the.House.on.Christmas.Eve.While.the.Familys.at.Mass.1080p.ATVP.WEB-DL.DDP5.1.Atmos.H.264-RAWR.mkv",
+			wantTitle:  "12 12 12",
+			wantSeason: 1,
+			wantEp:     1,
+		},
+		{
+			name:       "Something.Very.Bad.is.Going.to.Happen.S123E04.2160p.WEB.h265-ETHEL",
+			wantTitle:  "Something Very Bad is Going to Happen",
+			wantSeason: 123,
+			wantEp:     4,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "tv")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != 0 {
+				t.Errorf("year = %d, want 0", year)
+			}
+			if season != tc.wantSeason || ep != tc.wantEp {
+				t.Errorf("season/episode = %d/%d, want %d/%d", season, ep, tc.wantSeason, tc.wantEp)
+			}
+		})
+	}
+}
+
+// A season-only release has no episode subtitle, but the bare Sxx token must
+// still be removed from the show name.
+func TestParseReleaseTVSeasonOnlyDropsBareSeason(t *testing.T) {
+	title, year, season, ep := ParseRelease("The.Simpsons.S01.1080p.Web-DL.x264-OFT.mkv", "tv")
+	if title != "The Simpsons" {
+		t.Errorf("title = %q, want %q", title, "The Simpsons")
+	}
+	if year != 0 || season != 0 || ep != 0 {
+		t.Errorf("got year=%d season=%d episode=%d, want 0/0/0", year, season, ep)
+	}
+}
+
+// Movie controls: the TV-only truncation/stripping must not disturb movies,
+// including titles that start with digits and carry audio codec tags.
+func TestParseReleaseMovieControlUnaffected(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+	}{
+		{"10.Cloverfield.Lane.2016.720p.BluRay.DDP5.1.x264-HiDt", "10 Cloverfield Lane", 2016},
+		{"12.12.12.2022.720p.WEB-DL.x264-GROUP.mkv", "12 12 12", 2022},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle || year != tc.wantYear || season != 0 || ep != 0 {
+				t.Errorf("got title=%q year=%d season=%d episode=%d, want %q/%d/0/0",
+					title, year, season, ep, tc.wantTitle, tc.wantYear)
+			}
+		})
+	}
+}
