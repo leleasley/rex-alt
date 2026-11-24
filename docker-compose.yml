@@ -1,0 +1,18 @@
+services:
+  rex-alt:
+    image: ghcr.io/leleasley/rex-alt:0.1.0
+    container_name: rex-alt
+    restart: unless-stopped
+    env_file: .env
+    ports: ["9982:9982"]
+    volumes: ["rex-alt-data:/data"]
+    pids_limit: 64
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M, pids: 64 }
+    mem_limit: 512m
+    memswap_limit: 512m
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+volumes:
+  rex-alt-data:
