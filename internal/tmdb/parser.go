@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -61,6 +62,21 @@ var junkTokens = map[string]bool{
 	"subs": true, "srt": true, "ass": true, "req": true, "yify": true, "yts": true,
 }
 
+// wweFirstAirYears holds the TMDB first-air year of the daily wrestling brands
+// whose dated releases carry no SxxExx marker. Keys are normalised parsed show
+// names and deliberately mirror the documented TV search aliases: the brand
+// that resolves to a given TMDB series is the brand whose season numbering we
+// use. Other dated shows are left alone.
+var wweFirstAirYears = map[string]int{
+	"wwe monday night raw":       1993,
+	"wwe raw":                    1993,
+	"raw":                        1993,
+	"wwe friday night smackdown": 1999,
+	"smackdown":                  1999,
+	"wwe nxt":                    2010,
+	"nxt":                        2010,
+}
+
 // ParseRelease turns a WebDAV file or release name into the fields TMDB needs.
 // Dots and underscores become spaces; extension, bracketed group tags,
 // quality/source/codec tokens and the year or SxxExx marker are removed. The
@@ -80,6 +96,7 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 	base = strings.NewReplacer(".", " ", "_", " ").Replace(base)
 
 	datedShow := false
+	airDate := ""
 	if isTVCategory(category) {
 		if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
 			s, _ := strconv.Atoi(base[loc[2]:loc[3]])
@@ -95,6 +112,7 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 			if loc := tvAirDateRE.FindStringIndex(base); loc != nil {
 				// Daily-show air date: truncate just like an episode marker so
 				// resolution/codec/group tags cannot leak into the show name.
+				airDate = base[loc[0]:loc[1]]
 				base = base[:loc[0]]
 				datedShow = true
 			}
@@ -130,7 +148,47 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 			kept = append(kept, word)
 		}
 	}
-	return strings.Join(kept, " "), year, season, episode
+	title = strings.Join(kept, " ")
+
+	if datedShow && airDate != "" {
+		if firstYear, known := wweFirstAirYears[normalizeTitle(title)]; known {
+			if y, month, day, ok := parseAirDate(airDate); ok {
+				season = y - firstYear + 1
+				if season < 1 {
+					season = 1
+				}
+				_, week := time.Date(y, month, day, 0, 0, 0, 0, time.UTC).ISOWeek()
+				episode = week - 1
+				if episode < 1 {
+					episode = 1
+				}
+			}
+		}
+	}
+	return title, year, season, episode
+}
+
+// parseAirDate accepts the separator forms used by release names: dotted,
+// dashed and spaced. An invalid calendar date is reported as a miss so a bad
+// filename cannot produce a bogus season/episode.
+func parseAirDate(raw string) (int, time.Month, int, bool) {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '.' || r == '-' || r == ' '
+	})
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	year, errY := strconv.Atoi(parts[0])
+	month, errM := strconv.Atoi(parts[1])
+	day, errD := strconv.Atoi(parts[2])
+	if errY != nil || errM != nil || errD != nil {
+		return 0, 0, 0, false
+	}
+	date := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	if date.Year() != year || date.Month() != time.Month(month) || date.Day() != day {
+		return 0, 0, 0, false
+	}
+	return year, date.Month(), day, true
 }
 
 // stripAudioCodecs removes composite audio tags that the single-token junk

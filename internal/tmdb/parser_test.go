@@ -187,31 +187,59 @@ func TestParseReleaseTVSeasonOnlyDropsBareSeason(t *testing.T) {
 // Daily wrestling shows carry an episode air date instead of an SxxExx
 // marker. "2026.11.23" is the episode's air date, not the show's first-air
 // year: it (and the release tags after it) must be stripped so the show name
-// reaches TMDB clean and the year stays 0 (no year gate).
+// reaches TMDB clean and the year stays 0 (no year gate). For the known WWE
+// brands the date yields season = year - firstAirYear + 1 and
+// episode = ISOWeek(date) - 1; other dated shows stay at 0/0.
 func TestParseReleaseDatedDailyShow(t *testing.T) {
 	cases := []struct {
 		name, wantTitle string
+		wantSeason      int
+		wantEp          int
 	}{
 		{
-			name:      "WWE.Monday.Night.RAW.2026.11.23.1080p.WEBRip.h265-Star.mp4",
-			wantTitle: "WWE Monday Night RAW",
+			name:       "WWE.Monday.Night.RAW.2026.11.23.1080p.WEBRip.h265-Star.mp4",
+			wantTitle:  "WWE Monday Night RAW",
+			wantSeason: 34,
+			wantEp:     47, // 2026 is ISO week 48; Raw airs one episode per week
 		},
 		{
-			name:      "WWE.Friday.Night.SmackDown.2026.11.20.1080p.WEBRip.AAC2.0.HFR.H.265-SkY.mkv",
-			wantTitle: "WWE Friday Night SmackDown",
+			name:       "WWE.Friday.Night.SmackDown.2026.11.20.1080p.WEBRip.AAC2.0.HFR.H.265-SkY.mkv",
+			wantTitle:  "WWE Friday Night SmackDown",
+			wantSeason: 28, // 2026 - 1999 + 1
+			wantEp:     46,
 		},
 		{
-			name:      "WWE.RAW.2026.11.16.1080p.WEBRip.x264-DEF.mkv",
-			wantTitle: "WWE RAW",
+			name:       "WWE.RAW.2026.11.16.1080p.WEBRip.x264-DEF.mkv",
+			wantTitle:  "WWE RAW",
+			wantSeason: 34,
+			wantEp:     46, // ISO week 47 - 1
 		},
 		// Dash and space separators for the same air date.
 		{
-			name:      "WWE.RAW.2026-11-16.1080p.WEBRip.x264-DEF.mkv",
-			wantTitle: "WWE RAW",
+			name:       "WWE.RAW.2026-11-16.1080p.WEBRip.x264-DEF.mkv",
+			wantTitle:  "WWE RAW",
+			wantSeason: 34,
+			wantEp:     46,
 		},
 		{
-			name:      "WWE.NXT.2026 11 18.1080p.WEB-DL.x264-GRP.mkv",
-			wantTitle: "WWE NXT",
+			name:       "WWE.NXT.2026 11 18.1080p.WEB-DL.x264-GRP.mkv",
+			wantTitle:  "WWE NXT",
+			wantSeason: 17, // 2026 - 2010 + 1
+			wantEp:     46,
+		},
+		// The 1993 pilot is the very first Raw episode: season 1, episode 1.
+		{
+			name:       "WWE.Monday.Night.Raw.1993.01.11.1080p.WEBRip.x264-GRP.mkv",
+			wantTitle:  "WWE Monday Night Raw",
+			wantSeason: 1,
+			wantEp:     1,
+		},
+		// A dated show that is not a known WWE brand keeps the old behaviour.
+		{
+			name:       "Some.Other.Daily.Show.2026.11.23.1080p.WEB-DL-GRP.mkv",
+			wantTitle:  "Some Other Daily Show",
+			wantSeason: 0,
+			wantEp:     0,
 		},
 	}
 	for _, tc := range cases {
@@ -223,8 +251,8 @@ func TestParseReleaseDatedDailyShow(t *testing.T) {
 			if year != 0 {
 				t.Errorf("year = %d, want 0 (air date is not a first-air year)", year)
 			}
-			if season != 0 || ep != 0 {
-				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			if season != tc.wantSeason || ep != tc.wantEp {
+				t.Errorf("season/episode = %d/%d, want %d/%d", season, ep, tc.wantSeason, tc.wantEp)
 			}
 		})
 	}
