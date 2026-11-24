@@ -40,7 +40,7 @@ func isVideoFile(name string) bool {
 	return !samplePattern.MatchString(strings.TrimSuffix(name, ext))
 }
 
-// List enumerates one WebDAV category with a Depth: 2 PROPFIND and returns one
+// List enumerates one WebDAV category with a Depth: infinity PROPFIND and returns one
 // Entry per video file at <category>/<release>/<file>. Season and Episode stay
 // zero here; the release-name parser fills them in a later stage.
 func (c *Client) List(ctx context.Context, category string) ([]models.Entry, error) {

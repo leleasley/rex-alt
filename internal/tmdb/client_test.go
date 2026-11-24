@@ -404,7 +404,7 @@ func TestEnrichShowEpisode(t *testing.T) {
 		en.Summary != "An episode summary." || en.Date != "2025-02-10" {
 		t.Errorf("show/episode metadata = %+v", en)
 	}
-	if want := "https://image.tmdb.org/t/p/w300/showposter.jpg"; en.ShowPoster != want {
+	if want := "https://image.tmdb.org/t/p/w342/showposter.jpg"; en.ShowPoster != want {
 		t.Errorf("show poster = %q, want %q", en.ShowPoster, want)
 	}
 	if want := "https://image.tmdb.org/t/p/w780/showbackdrop.jpg"; en.ShowBackdrop != want {

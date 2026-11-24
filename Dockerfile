@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 go build -o /out/rex-alt ./cmd/rex-alt
 
 # Runtime stage: only the static binary, CA roots and ffprobe.
 FROM alpine:3.21
+ARG APP_VERSION=dev
 RUN apk add --no-cache ca-certificates ffmpeg \
     && addgroup -g 1000 -S rex-alt \
     && adduser -u 1000 -S -G rex-alt -h /data rex-alt \
@@ -20,7 +21,8 @@ COPY --from=builder /out/rex-alt /usr/local/bin/rex-alt
 USER 1000:1000
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=9982 \
-    DATABASE_PATH=/data/rex-alt.db
+    DATABASE_PATH=/data/rex-alt.db \
+    APP_VERSION=${APP_VERSION}
 VOLUME ["/data"]
 EXPOSE 9982
 ENTRYPOINT ["/usr/local/bin/rex-alt"]

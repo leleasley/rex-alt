@@ -22,7 +22,7 @@ const (
 	defaultBaseURL   = "https://api.themoviedb.org"
 	defaultImageBase = "https://image.tmdb.org/t/p/"
 	posterSize       = "w500"
-	showPosterSize   = "w300"
+	showPosterSize   = "w342" // poster_sizes in /3/configuration: w342, w500, w780, original
 	backdropSize     = "w780"
 	stillSize        = "w300" // still_sizes in /3/configuration: w92, w300, original
 	maxRetries       = 3

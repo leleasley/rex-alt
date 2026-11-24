@@ -1,12 +1,17 @@
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:v0.1.1
+    image: ghcr.io/leleasley/rex-alt:v0.1.2
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
     ports: ["9982:9982"]
     volumes: ["rex-alt-data:/data"]
     pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 512M, pids: 64 }

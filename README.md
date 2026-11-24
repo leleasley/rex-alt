@@ -106,13 +106,18 @@ You can either use the provided image-only `/opt/rex-alt/docker-compose.yml` as-
 ```yaml
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:v0.1.1
+    image: ghcr.io/leleasley/rex-alt:v0.1.2
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
     ports: ["9982:9982"]
     volumes: ["rex-alt-data:/data"]
     pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 512M, pids: 64 }
@@ -124,7 +129,7 @@ volumes:
   rex-alt-data:
 ```
 
-Keep it **image-only** (no `build:`). The tag `v0.1.0` is pinned to a published multi-arch image.
+Keep it **image-only** (no `build:`). The tag `v0.1.2` will be pinned to a published multi-arch image.
 
 ## Step 3 — Start it
 
@@ -143,7 +148,7 @@ Check the add-on's liveness endpoint (no token needed):
 
 ```bash
 curl -sS http://<host>:9982/api/v1/health
-# Expected: {"status":"ok","version":"0.1.0"}
+# Expected: {"status":"ok","version":"0.1.2"}
 ```
 
 Check that REX knows the source (REX answers with the source shape, never credentials):
@@ -238,6 +243,7 @@ Canonical environment variable names are below (see `.env.example` for the annot
 ## Resource and safety notes
 
 - The compose file caps the container at **0.5 CPU and 512 MB** (`cpus: "0.5"`, `mem_limit: 512m`, `memswap_limit: 512m`), with `pids_limit: 64`, a read-only root filesystem and a small `tmpfs` for `/tmp`.
+- Container logs are rotated by the `json-file` driver at **10 MB per file, 3 files retained** (`max-size: "10m"`, `max-file: "3"`), so log growth cannot exceed roughly 30 MB per container.
 - It stores **no media bytes**: the only persistent state is the SQLite database of ids, paths and cached probe/TMDB metadata. ffprobe children are short-lived and bounded by `PROBE_TIMEOUT`.
 - REX feed requests are batched and split to stay under REX's 16 MiB body cap.
 - **Deletion safety:** keep REX's `allowMediaDeletion` off. With it on, a Plex delete would be forwarded as a WebDAV `DELETE` to Altmount. With it off, REX returns `403` and sends no `DELETE`.
