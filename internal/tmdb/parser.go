@@ -127,28 +127,33 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 	// "Blade Runner 2049 2017" put the film's title number first. A dated
 	// daily show has no first-air year in the name, so its year stays 0 and
 	// the ±1 year gate does not reject the real (often much older) series.
+	// The title is the tokens BEFORE the year: everything from the year on
+	// is release metadata (resolution, source, audio, language, group), so
+	// the prefix is remembered and junk after the year can never leak into
+	// the title no matter what new tags appear there.
+	yearFound := false
+	yearPrefix := ""
 	if !datedShow {
 		if locs := yearRE.FindAllStringIndex(base, -1); len(locs) > 0 {
 			loc := locs[len(locs)-1]
 			year, _ = strconv.Atoi(base[loc[0]:loc[1]])
+			yearFound = true
+			yearPrefix = base[:loc[0]]
 			base = base[:loc[0]] + " " + base[loc[1]:]
 		}
 	}
 
-	base = stripAudioCodecs(base)
-
-	// Group tags in brackets are removed last so a year such as "(2022)" is
-	// still available to the extraction above.
-	base = bracketRE.ReplaceAllString(base, " ")
-
-	words := strings.Fields(base)
-	kept := make([]string, 0, len(words))
-	for _, word := range words {
-		if !isJunkToken(word) {
-			kept = append(kept, word)
+	if yearFound {
+		if prefixTitle := cleanTitleFragment(yearPrefix); prefixTitle != "" {
+			title = prefixTitle
+		} else {
+			// Year-first name (or nothing but junk before the year): fall
+			// back to the whole-base filter so the title is not empty.
+			title = cleanTitleFragment(base)
 		}
+	} else {
+		title = cleanTitleFragment(base)
 	}
-	title = strings.Join(kept, " ")
 
 	if datedShow && airDate != "" {
 		if firstYear, known := wweFirstAirYears[normalizeTitle(title)]; known {
@@ -189,6 +194,30 @@ func parseAirDate(raw string) (int, time.Month, int, bool) {
 		return 0, 0, 0, false
 	}
 	return year, date.Month(), day, true
+}
+
+// cleanTitleFragment runs the existing title-cleaning passes (composite
+// audio tags, bracketed group tags, single-token junk filter) over one
+// fragment, then drops any trailing junk tokens that remain inside the
+// fragment (e.g. the REPACK in "Movie REPACK 2025").
+func cleanTitleFragment(s string) string {
+	s = stripAudioCodecs(s)
+
+	// Group tags in brackets are removed last so a year such as "(2022)" is
+	// still available to the extraction above.
+	s = bracketRE.ReplaceAllString(s, " ")
+
+	words := strings.Fields(s)
+	kept := make([]string, 0, len(words))
+	for _, word := range words {
+		if !isJunkToken(word) {
+			kept = append(kept, word)
+		}
+	}
+	for len(kept) > 0 && isJunkToken(kept[len(kept)-1]) {
+		kept = kept[:len(kept)-1]
+	}
+	return strings.Join(kept, " ")
 }
 
 // stripAudioCodecs removes composite audio tags that the single-token junk

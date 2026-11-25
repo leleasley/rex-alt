@@ -270,6 +270,50 @@ func TestParseReleaseDatedEpisodeKeepsMarkerBehaviour(t *testing.T) {
 	}
 }
 
+// Live root cause (Plex showed raw filenames): junk AFTER the year (SDR,
+// H 265, 6CH, ITA-ENG, TrueHD7 1, group suffixes) leaked into the title
+// because the whole base was junk-filtered. The title is the tokens BEFORE
+// the year; everything from the year on is release metadata, so it is cut.
+// Token-list patching cannot cover this class; the cut makes it structural.
+func TestParseReleaseTitleEndsAtYear(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+	}{
+		{"Abigail.2024.1080p.AMZN.WEB-DL.DDP5.1.SDR.H.265-GRiMM.mkv", "Abigail", 2024},
+		{"Afterburn.2025.1080p.AMZN.WEB-DL.DDP5.1.SDR.ITA-ENG.H.265-TEPES.mkv", "Afterburn", 2025},
+		{"Ballerina.2025.1080p.AMZN.WEB-DL.DDP5.1.TrueHD7.1-RYY.mkv", "Ballerina", 2025},
+		{"Anora.2024.1080p.AMZN.WEB-DL.DDP5.1.6CH.mkv", "Anora", 2024},
+		{"28.Years.Later.2025.1080p.AMZN.WEB-DL.DDP5.1.H.265-GRP.mkv", "28 Years Later", 2025},
+		// A title number is part of the prefix, not the release year: the
+		// LAST 4-digit year wins and everything before it is the title.
+		{"Blade.Runner.2049.2017.1080p.BluRay.x264-GROUP.mkv", "Blade Runner 2049", 2017},
+		{"2012.2009.1080p.BluRay.x264-GROUP.mkv", "2012", 2009},
+		// Junk inside the prefix is still stripped (REPACK precedes the year).
+		{"Movie.REPACK.2025.1080p.WEB-DL.x264-GROUP.mkv", "Movie", 2025},
+		// No year: behaviour is unchanged (whole base is junk-filtered).
+		{"Some.Movie.WEBDL.mkv", "Some Movie", 0},
+		// Year-first: the prefix is empty so behaviour falls back to the
+		// whole-base filter instead of producing an empty title.
+		{"2025.Movie.Name.1080p.WEB-DL.x264-GROUP.mkv", "Movie Name", 2025},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != tc.wantYear {
+				t.Errorf("year = %d, want %d", year, tc.wantYear)
+			}
+			if season != 0 || ep != 0 {
+				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			}
+		})
+	}
+}
+
 // Movie controls: the TV-only truncation/stripping must not disturb movies,
 // including titles that start with digits and carry audio codec tags.
 func TestParseReleaseMovieControlUnaffected(t *testing.T) {
