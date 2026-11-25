@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1051,6 +1052,224 @@ func TestEnrichRejectsUnrelatedTVHitWithNoYear(t *testing.T) {
 	}
 }
 
+// A parsed title can be a strict subset of the official TMDB title
+// ("Borat Subsequent Moviefilm" vs the full official title): Dice is diluted
+// below 0.6 and forward containment is 0, so reverse containment must recover
+// the full title while the year gate still applies.
+func TestReverseContainmentScoreMirrorsContainment(t *testing.T) {
+	cases := []struct {
+		name, want, got string
+		score           float64
+	}{
+		{"three of eighteen candidate tokens", "Borat Subsequent Moviefilm", "Borat Subsequent Moviefilm Delivery of Prodigious Bribe to American Regime for Make Benefit Once Glorious Nation of Kazakhstan", 0.6 + 0.35*3.0/18.0},
+		{"full candidate stays below exact", "Train Dreams", "Train Dreams", 0.95},
+		{"query with extra token is not reverse contained", "Train Dreams Revisited", "Train Dreams", 0},
+		{"single-token query is not reverse contained", "Relay", "Relay Station", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reverseContainmentScore(tc.want, tc.got)
+			if math.Abs(got-tc.score) > 1e-9 {
+				t.Errorf("reverseContainmentScore(%q, %q) = %.4f, want %.4f", tc.want, tc.got, got, tc.score)
+			}
+			if got >= 1 {
+				t.Errorf("reverse containment score %v must stay below exact-match 1.0", got)
+			}
+		})
+	}
+}
+
+func TestEnrichResolvesSupersetCandidateTitle(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	const fullTitle = "Borat Subsequent Moviefilm: Delivery of Prodigious Bribe to American Regime for Make Benefit Once Glorious Nation of Kazakhstan"
+	searchBody := `{"results":[{"id":659986,"title":` + strconv.Quote(fullTitle) + `,"release_date":"2020-10-23"}]}`
+	detailsBody := `{"id":659986,"imdb_id":"tt13143964","title":` + strconv.Quote(fullTitle) + `,"release_date":"2020-10-23","overview":"Borat overview."}`
+
+	var mu sync.Mutex
+	var detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		case "/3/movie/659986":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, detailsBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Borat Subsequent Moviefilm", 2020, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false for a superset official title")
+	}
+	if en.TMDBID != 659986 {
+		t.Errorf("TMDBID = %d, want 659986", en.TMDBID)
+	}
+	if en.Title != fullTitle || en.Date != "2020-10-23" {
+		t.Errorf("metadata = %+v", en)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/659986" {
+		t.Errorf("details paths = %v, want only /3/movie/659986", detailsPaths)
+	}
+}
+
+// TMDB's own primary_release_year filter excludes films whose filename year is
+// off by one (festival vs wide release). The client must repeat the ladder
+// without the year param and let the unchanged ±1 year gate pick the hit.
+func TestEnrichFallsBackToSearchWithoutYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	withoutYear := `{"results":[
+		{"id":111,"title":"Almost Friends","release_date":"2014-01-01"},
+		{"id":428496,"title":"Almost Friends","release_date":"2017-11-17"}
+	]}`
+	detailsBody := `{"id":428496,"imdb_id":"tt428496","title":"Almost Friends","release_date":"2017-11-17","overview":"Almost Friends overview."}`
+
+	var mu sync.Mutex
+	var searches []seenRequest
+	var detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			mu.Lock()
+			searches = append(searches, snapshot(r))
+			mu.Unlock()
+			if r.URL.Query().Get("primary_release_year") != "" {
+				// Year-filtered TMDB search returns nothing for the off-by-one file year.
+				writeJSON(w, `{"results":[]}`)
+				return
+			}
+			writeJSON(w, withoutYear)
+		case "/3/movie/428496":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, detailsBody)
+		default:
+			// Fetching the 2014 decoy's details would be a wrong-id attach.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Almost Friends", 2016, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false after the yearless retry")
+	}
+	if en.TMDBID != 428496 || en.Date != "2017-11-17" {
+		t.Errorf("Enrich = %+v, want id 428496 date 2017-11-17 (2014 decoy rejected by year gate)", en)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/428496" {
+		t.Errorf("details paths = %v, want only /3/movie/428496", detailsPaths)
+	}
+	seenYearless := false
+	for _, s := range searches {
+		if s.query.Get("primary_release_year") == "" {
+			seenYearless = true
+		}
+	}
+	if !seenYearless {
+		t.Error("no yearless retry search was made")
+	}
+	if len(searches) > 2*(1+len(fallbackSearchTitles("Almost Friends"))) {
+		t.Errorf("searches = %d, want at most twice the ladder length", len(searches))
+	}
+}
+
+// Reverse containment must not widen the wrong-id guard: a superset candidate
+// whose year is outside the ±1 gate is still rejected.
+func TestEnrichRejectsSupersetCandidateWithWrongYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	const fullTitle = "Borat Subsequent Moviefilm: Delivery of Prodigious Bribe to American Regime for Make Benefit Once Glorious Nation of Kazakhstan"
+	searchBody := `{"results":[{"id":659986,"title":` + strconv.Quote(fullTitle) + `,"release_date":"2020-10-23"}]}`
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Borat Subsequent Moviefilm", 2018, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched for a superset decoy two years off", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for a wrong-year superset candidate")
+	}
+}
+
+// Reverse containment must not accept an unrelated title for a short query.
+func TestEnrichRejectsUnrelatedSupersetQuery(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := fixture(t, "movie_search_unrelated_top.json")
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Borat Subsequent Moviefilm", 2020, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated hit")
+	}
+}
+
 func TestEnrichCachesConfigurationAndKeysByEpisode(t *testing.T) {
 	configBody := fixture(t, "configuration.json")
 	searchBody := fixture(t, "tv_search.json")
@@ -1542,6 +1761,8 @@ func TestEnrichFallbackTriesQueryPrefixes(t *testing.T) {
 
 // Prefix shortening widens the search, not the acceptance rule: an unrelated
 // hit returned for every attempt must still be rejected without a details fetch.
+// With a year parsed the ladder runs twice (with year, then without), so the
+// cap is twice the ladder length.
 func TestEnrichRejectsUnrelatedHitAcrossAllPrefixes(t *testing.T) {
 	configBody := fixture(t, "configuration.json")
 	var mu sync.Mutex
@@ -1574,8 +1795,8 @@ func TestEnrichRejectsUnrelatedHitAcrossAllPrefixes(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if searches != 5 {
-		t.Errorf("searches = %d, want 5 (first + four prefixes)", searches)
+	if searches != 10 {
+		t.Errorf("searches = %d, want 10 (ladder of 5 with year, then without)", searches)
 	}
 	if detailsFetched {
 		t.Error("client fetched details for an unrelated prefix hit")

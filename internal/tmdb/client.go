@@ -118,7 +118,10 @@ func NewClient(readToken, apiKey string, cache *store.Store, h *http.Client) *Cl
 // title|year|isShow|season|episode key. When the first search returns no
 // eligible hit, up to four retries use progressively shorter cleaned queries
 // built from the parsed title; their hits are still scored against that
-// original title.
+// original title. When the full ladder with a year still yields nothing, the
+// same ladder repeats without the year param (TMDB's own year filter drops
+// off-by-one festival-vs-wide-release years); scoring still uses the original
+// year so the ±1 gate is unchanged.
 func (c *Client) Enrich(ctx context.Context, title string, year, season, episode int, isShow bool) (models.Enriched, bool, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -184,6 +187,52 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 					parsedTitle, year); candidate >= 0 {
 					idx, results = candidate, retry
 					break
+				}
+			}
+		}
+		if idx < 0 && year > 0 {
+			// TMDB's own first_air_date_year filter excludes shows whose
+			// filename year is off by one. Repeat the same ladder without
+			// the year param, still scoring against the original title and
+			// year so the unchanged ±1 gate applies.
+			params.Del("first_air_date_year")
+			params.Set("query", title)
+			var retry struct {
+				Results []searchResult `json:"results"`
+			}
+			if err := c.getJSON(ctx, "/3/search/tv", params, &retry); err != nil {
+				return models.Enriched{}, false, err
+			}
+			if len(retry.Results) > 0 {
+				if candidate := bestHitIndex(retry.Results,
+					func(r searchResult) string { return r.Name },
+					func(r searchResult) string { return r.FirstAirDate },
+					parsedTitle, year); candidate >= 0 {
+					idx, results = candidate, retry
+				}
+			}
+			if idx < 0 {
+				for _, fallback := range fallbackSearchTitles(parsedTitle) {
+					if fallback == title {
+						continue
+					}
+					params.Set("query", fallback)
+					var retry struct {
+						Results []searchResult `json:"results"`
+					}
+					if err := c.getJSON(ctx, "/3/search/tv", params, &retry); err != nil {
+						return models.Enriched{}, false, err
+					}
+					if len(retry.Results) == 0 {
+						continue
+					}
+					if candidate := bestHitIndex(retry.Results,
+						func(r searchResult) string { return r.Name },
+						func(r searchResult) string { return r.FirstAirDate },
+						parsedTitle, year); candidate >= 0 {
+						idx, results = candidate, retry
+						break
+					}
 				}
 			}
 		}
@@ -266,6 +315,52 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 				}
 			}
 		}
+		if idx < 0 && year > 0 {
+			// TMDB's own primary_release_year filter excludes films whose
+			// filename year is off by one (festival vs wide release). Repeat
+			// the same ladder without the year param, still scoring against
+			// the original title and year so the unchanged ±1 gate applies.
+			params.Del("primary_release_year")
+			params.Set("query", title)
+			var retry struct {
+				Results []searchResult `json:"results"`
+			}
+			if err := c.getJSON(ctx, "/3/search/movie", params, &retry); err != nil {
+				return models.Enriched{}, false, err
+			}
+			if len(retry.Results) > 0 {
+				if candidate := bestHitIndex(retry.Results,
+					func(r searchResult) string { return r.Title },
+					func(r searchResult) string { return r.ReleaseDate },
+					parsedTitle, year); candidate >= 0 {
+					idx, results = candidate, retry
+				}
+			}
+			if idx < 0 {
+				for _, fallback := range fallbackSearchTitles(parsedTitle) {
+					if fallback == title {
+						continue
+					}
+					params.Set("query", fallback)
+					var retry struct {
+						Results []searchResult `json:"results"`
+					}
+					if err := c.getJSON(ctx, "/3/search/movie", params, &retry); err != nil {
+						return models.Enriched{}, false, err
+					}
+					if len(retry.Results) == 0 {
+						continue
+					}
+					if candidate := bestHitIndex(retry.Results,
+						func(r searchResult) string { return r.Title },
+						func(r searchResult) string { return r.ReleaseDate },
+						parsedTitle, year); candidate >= 0 {
+						idx, results = candidate, retry
+						break
+					}
+				}
+			}
+		}
 		if idx < 0 {
 			return models.Enriched{}, false, nil
 		}
@@ -330,9 +425,12 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 // never displace the right film or trigger a wrong-id attach. Higher scores
 // win; ties keep the higher-ranked result, except that an exact normalised
 // title match (score 1.0) wins a tie as required. A candidate whose tokens are
-// all contained in the parsed title gets a boost proportional to the share of
-// query tokens it covers, which recovers releases with trailing codec/group
-// junk without letting a short subset outrank a more complete title.
+// all contained in the parsed query gets a boost proportional to the share of
+// query tokens it covers, and symmetrically a parsed query whose tokens are
+// all contained in the candidate (a short name vs the full official title)
+// gets the mirrored boost; both stay below 1.0 so an exact match still wins.
+// These recover releases with trailing codec/group junk or abbreviated
+// queries without letting a short subset outrank a more complete title.
 func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle string, wantYear int) int {
 	limit := len(results)
 	if limit > maxSearchResults {
@@ -349,6 +447,9 @@ func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle 
 		score := titleScore(wantTitle, hitTitle)
 		if contained := containmentScore(wantTitle, hitTitle); contained > score {
 			score = contained
+		}
+		if reverse := reverseContainmentScore(wantTitle, hitTitle); reverse > score {
+			score = reverse
 		}
 		if single := singleTokenContainedScore(wantTitle, hitTitle, wantYear); single > score {
 			score = single
@@ -414,6 +515,35 @@ func containmentScore(want, got string) float64 {
 		counts[token]--
 	}
 	return containedTitleBase + containedTitleSpan*float64(len(gotTokens))/float64(len(wantTokens))
+}
+
+// reverseContainmentScore scores a TMDB title highly when every token of the
+// parsed query is also a token of the candidate and the query has at least
+// two tokens. A short parsed release name can be a strict subset of the
+// official title ("Borat Subsequent Moviefilm" vs the full official title),
+// which dilutes the Dice overlap below minTitleScore while forward
+// containment is 0 because the candidate carries extra tokens. The boost
+// mirrors containmentScore with the ratio inverted: base plus span times the
+// share of candidate tokens the query covers, staying below the 1.0 of an
+// exact normalised match so exact still wins. The two-token minimum keeps the
+// no-year guard; single-token queries with a year are handled by
+// singleTokenContainedScore instead.
+func reverseContainmentScore(want, got string) float64 {
+	wantTokens, gotTokens := titleTokens(want), titleTokens(got)
+	if len(wantTokens) < 2 || len(gotTokens) == 0 {
+		return 0
+	}
+	counts := make(map[string]int, len(gotTokens))
+	for _, token := range gotTokens {
+		counts[token]++
+	}
+	for _, token := range wantTokens {
+		if counts[token] == 0 {
+			return 0
+		}
+		counts[token]--
+	}
+	return containedTitleBase + containedTitleSpan*float64(len(wantTokens))/float64(len(gotTokens))
 }
 
 // singleTokenContainedScore admits a one-word TMDB title only when a year was
