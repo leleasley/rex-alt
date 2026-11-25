@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1418,5 +1419,165 @@ func TestEnrichRejectsSingleTokenHitWithoutYear(t *testing.T) {
 	defer mu.Unlock()
 	if detailsFetched {
 		t.Error("client fetched details for a single-token hit without a year")
+	}
+}
+
+func TestFallbackSearchTitlesSequence(t *testing.T) {
+	cases := []struct {
+		title string
+		want  []string
+	}{
+		{
+			"6 Underground AAC5 1 LAMA",
+			[]string{"6 underground aac5 1 lama", "6 underground aac5 1", "6 underground aac5", "6 underground"},
+		},
+		{
+			"A Hollywood Christmas DDP 5 1 DV H 265 PiRaTeS",
+			[]string{"a hollywood christmas ddp 5 1", "a hollywood christmas ddp", "a hollywood christmas", "a hollywood"},
+		},
+		{"Relay", []string{"relay"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.title, func(t *testing.T) {
+			got := fallbackSearchTitles(tc.title)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("queries = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// When the cleaned query still carries codec junk, TMDB returns nothing. The
+// client must walk shorter prefixes until one scores against the original
+// parsed title, without changing the first query or the cache key.
+func TestEnrichFallbackTriesQueryPrefixes(t *testing.T) {
+	cases := []struct {
+		name, title, hitQuery, wantTitle, wantDate string
+		year, wantID                               int
+		wantQueries                                []string
+	}{
+		{
+			name:        "six underground via two-token prefix",
+			title:       "6 Underground AAC5 1 LAMA",
+			year:        2019,
+			hitQuery:    "6 underground",
+			wantID:      532152,
+			wantTitle:   "6 Underground",
+			wantDate:    "2019-12-13",
+			wantQueries: []string{"6 underground aac5 1 lama", "6 underground aac5 1", "6 underground aac5", "6 underground"},
+		},
+		{
+			name:        "hollywood christmas via three-token prefix",
+			title:       "A Hollywood Christmas DDP 5 1 DV H 265 PiRaTeS",
+			year:        2022,
+			hitQuery:    "a hollywood christmas",
+			wantID:      1011985,
+			wantTitle:   "A Hollywood Christmas",
+			wantDate:    "2022-12-01",
+			wantQueries: []string{"a hollywood christmas ddp 5 1", "a hollywood christmas ddp", "a hollywood christmas"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			hit := fmt.Sprintf(
+				`{"results":[{"id":%d,"title":%q,"release_date":%q,"overview":"Prefix overview.",`+
+					`"poster_path":"/prefix-poster.jpg","backdrop_path":"/prefix-backdrop.jpg"}]}`,
+				tc.wantID, tc.wantTitle, tc.wantDate)
+			details := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,"overview":"Prefix overview."}`,
+				tc.wantID, tc.wantID, tc.wantTitle, tc.wantDate)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.wantID)
+
+			var mu sync.Mutex
+			var queries, detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					q := r.URL.Query().Get("query")
+					mu.Lock()
+					queries = append(queries, q)
+					mu.Unlock()
+					if q == tc.hitQuery {
+						writeJSON(w, hit)
+						return
+					}
+					writeJSON(w, `{"results":[]}`)
+				default:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					if r.URL.Path == wantDetails {
+						writeJSON(w, details)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, tc.year, 0, 0, false)
+			if err != nil || !ok {
+				t.Fatalf("Enrich = %+v, %v, %v; want id %d", en, ok, err, tc.wantID)
+			}
+			if en.TMDBID != tc.wantID || en.Title != tc.wantTitle || en.Date != tc.wantDate {
+				t.Errorf("Enrich = %+v, want id=%d title=%q date=%q", en, tc.wantID, tc.wantTitle, tc.wantDate)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			wantQueries := append([]string{tc.title}, tc.wantQueries...)
+			if !reflect.DeepEqual(queries, wantQueries) {
+				t.Errorf("search queries = %q, want %q", queries, wantQueries)
+			}
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// Prefix shortening widens the search, not the acceptance rule: an unrelated
+// hit returned for every attempt must still be rejected without a details fetch.
+func TestEnrichRejectsUnrelatedHitAcrossAllPrefixes(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	var mu sync.Mutex
+	searches, detailsFetched := 0, false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			mu.Lock()
+			searches++
+			mu.Unlock()
+			writeJSON(w, `{"results":[{"id":999,"title":"A Completely Different Film","release_date":"2022-01-01"}]}`)
+		default:
+			mu.Lock()
+			detailsFetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "A Hollywood Christmas DDP 5 1 DV H 265 PiRaTeS", 2022, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en.TMDBID != 0 {
+		t.Errorf("Enrich = %+v, %v; want ok=false and no id", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if searches != 5 {
+		t.Errorf("searches = %d, want 5 (first + four prefixes)", searches)
+	}
+	if detailsFetched {
+		t.Error("client fetched details for an unrelated prefix hit")
 	}
 }

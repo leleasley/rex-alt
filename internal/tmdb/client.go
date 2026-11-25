@@ -116,8 +116,9 @@ func NewClient(readToken, apiKey string, cache *store.Store, h *http.Client) *Cl
 // well-known daily/wrestling brands before search; all other titles are
 // untouched. Successful results are cached in SQLite under the normalised
 // title|year|isShow|season|episode key. When the first search returns no
-// eligible hit, one retry uses a cleaned query built from the parsed title;
-// its hits are still scored against that original title.
+// eligible hit, up to four retries use progressively shorter cleaned queries
+// built from the parsed title; their hits are still scored against that
+// original title.
 func (c *Client) Enrich(ctx context.Context, title string, year, season, episode int, isShow bool) (models.Enriched, bool, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -163,7 +164,10 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 				title, year)
 		}
 		if idx < 0 {
-			if fallback := fallbackSearchTitle(parsedTitle); fallback != "" && fallback != title {
+			for _, fallback := range fallbackSearchTitles(parsedTitle) {
+				if fallback == title {
+					continue
+				}
 				params.Set("query", fallback)
 				var retry struct {
 					Results []searchResult `json:"results"`
@@ -171,14 +175,15 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 				if err := c.getJSON(ctx, "/3/search/tv", params, &retry); err != nil {
 					return models.Enriched{}, false, err
 				}
-				if len(retry.Results) > 0 {
-					idx = bestHitIndex(retry.Results,
-						func(r searchResult) string { return r.Name },
-						func(r searchResult) string { return r.FirstAirDate },
-						parsedTitle, year)
-					if idx >= 0 {
-						results = retry
-					}
+				if len(retry.Results) == 0 {
+					continue
+				}
+				if candidate := bestHitIndex(retry.Results,
+					func(r searchResult) string { return r.Name },
+					func(r searchResult) string { return r.FirstAirDate },
+					parsedTitle, year); candidate >= 0 {
+					idx, results = candidate, retry
+					break
 				}
 			}
 		}
@@ -238,7 +243,10 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 				title, year)
 		}
 		if idx < 0 {
-			if fallback := fallbackSearchTitle(parsedTitle); fallback != "" && fallback != title {
+			for _, fallback := range fallbackSearchTitles(parsedTitle) {
+				if fallback == title {
+					continue
+				}
 				params.Set("query", fallback)
 				var retry struct {
 					Results []searchResult `json:"results"`
@@ -246,14 +254,15 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 				if err := c.getJSON(ctx, "/3/search/movie", params, &retry); err != nil {
 					return models.Enriched{}, false, err
 				}
-				if len(retry.Results) > 0 {
-					idx = bestHitIndex(retry.Results,
-						func(r searchResult) string { return r.Title },
-						func(r searchResult) string { return r.ReleaseDate },
-						parsedTitle, year)
-					if idx >= 0 {
-						results = retry
-					}
+				if len(retry.Results) == 0 {
+					continue
+				}
+				if candidate := bestHitIndex(retry.Results,
+					func(r searchResult) string { return r.Title },
+					func(r searchResult) string { return r.ReleaseDate },
+					parsedTitle, year); candidate >= 0 {
+					idx, results = candidate, retry
+					break
 				}
 			}
 		}
@@ -463,14 +472,13 @@ func cacheKey(title string, year int, isShow bool, season, episode int) string {
 // never applied to the first search, which stays byte-for-byte identical.
 var fallbackJunkRE = regexp.MustCompile(`(?i)\b(?:hdr10plus|hdr10|hdr|dv|remux|mpeg[- ]?2|mpeg|avc|x264|x265|h264|h265|hevc|web[- ]?dl|web|dl|webrip|bluray|blueray|blu|ray|amzn|nf|dsnp|hmax|atvp)\b`)
 
-// fallbackSearchTitle builds a short, clean TMDB query from a parsed release
-// title: upload timestamps/ids at the front and release-group tails are
-// dropped, then at most four title words are kept. Short leading numbers are
-// part of titles ("12 Hour Shift", "101 Dalmatians 2") and are preserved.
-func fallbackSearchTitle(title string) string {
+// fallbackCleanTokens removes upload timestamps, release-group tails and known
+// codec/source tags from a parsed title. Short leading numbers are part of
+// titles ("12 Hour Shift", "101 Dalmatians 2") and are preserved.
+func fallbackCleanTokens(title string) []string {
 	cleaned := fallbackJunkRE.ReplaceAllString(
 		strings.NewReplacer(".", " ", "_", " ").Replace(title), " ")
-	out := make([]string, 0, 4)
+	out := make([]string, 0, 8)
 	leading := true
 	for _, field := range strings.Fields(cleaned) {
 		// Upload-group suffixes are glued to a hyphen ("-BLURANiUM").
@@ -483,12 +491,50 @@ func fallbackSearchTitle(title string) string {
 			}
 			leading = false
 			out = append(out, token)
-			if len(out) == 4 {
-				return strings.Join(out, " ")
-			}
 		}
 	}
-	return strings.Join(out, " ")
+	return out
+}
+
+// fallbackQueryOfSize joins the first n cleaned tokens, tolerating n above the
+// token count.
+func fallbackQueryOfSize(tokens []string, n int) string {
+	if n > len(tokens) {
+		n = len(tokens)
+	}
+	if n <= 0 {
+		return ""
+	}
+	return strings.Join(tokens[:n], " ")
+}
+
+// fallbackSearchTitle is the four-token rung of the fallback ladder.
+func fallbackSearchTitle(title string) string {
+	return fallbackQueryOfSize(fallbackCleanTokens(title), 4)
+}
+
+// fallbackSearchTitles is the ordered set of retry queries: all cleaned
+// tokens (capped at six), then progressively shorter prefixes. Duplicates and
+// empty queries are skipped so a short parsed title is not searched twice.
+func fallbackSearchTitles(title string) []string {
+	tokens := fallbackCleanTokens(title)
+	queries := make([]string, 0, 4)
+	add := func(q string) {
+		if q == "" {
+			return
+		}
+		for _, previous := range queries {
+			if previous == q {
+				return
+			}
+		}
+		queries = append(queries, q)
+	}
+	add(fallbackQueryOfSize(tokens, 6))
+	add(fallbackSearchTitle(title))
+	add(fallbackQueryOfSize(tokens, 3))
+	add(fallbackQueryOfSize(tokens, 2))
+	return queries
 }
 
 func isUploadNumber(token string) bool {
