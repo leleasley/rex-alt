@@ -80,6 +80,10 @@ var movieSearchAliases = map[string]string{
 	// deliberately absent: it is the Turkish title of the 2020 film and must
 	// never map to the 2022 sequel.
 	"kirpi sonic 2": "Sonic the Hedgehog 2",
+	// "Stake Land 2" is the release title of the 2016 film TMDB lists as
+	// "The Stakelander" (TMDB id 410988, release 2016-10-14, verified live).
+	// The alias rewrites the search so the canonical title scores 1.0.
+	"stake land 2": "The Stakelander",
 }
 
 // movieSearchTitle applies the alias only on the movie search path. It runs
@@ -796,12 +800,15 @@ func foldDiacritics(s string) string {
 }
 
 // normalizeTitle keeps letters and digits only, lower-cased and separated by
-// single spaces. Diacritics are folded and standalone multi-character Roman
-// numerals map to arabic first, so both sides of every comparison — exact
-// match, Dice, containment and the cache key — agree. It is used for both the
-// match check and the cache key.
+// single spaces. Diacritics are folded, hyphens joining two letters are
+// deleted ("Z-O-M-B-I-E-S"→"zombies", "X-Men"→"xmen") and standalone
+// multi-character Roman numerals map to arabic first, so both sides of every
+// comparison — exact match, Dice, containment and the cache key — agree. A
+// hyphen touching a digit still separates ("3754-Family", "265-EVO") so
+// numeric-prefix and codec-token handling is unchanged. It is used for both
+// the match check and the cache key.
 func normalizeTitle(s string) string {
-	words := strings.FieldsFunc(foldDiacritics(strings.ToLower(s)), func(r rune) bool {
+	words := strings.FieldsFunc(deleteLetterHyphens(foldDiacritics(strings.ToLower(s))), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	for i, word := range words {
@@ -810,6 +817,38 @@ func normalizeTitle(s string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// deleteLetterHyphens removes an ASCII hyphen only when it joins two letters,
+// so stylised TMDB titles ("Z-O-M-B-I-E-S", "X-Men", "Spider-Man") normalise
+// to the single token a parsed release name yields. Any other hyphen becomes
+// a space, preserving the old split for numeric prefixes ("3754-Family") and
+// codec tails ("265-EVO").
+func deleteLetterHyphens(s string) string {
+	if !strings.Contains(s, "-") {
+		return s
+	}
+	runes := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i, r := range runes {
+		if r != '-' {
+			b.WriteRune(r)
+			continue
+		}
+		var prev, next rune
+		if i > 0 {
+			prev = runes[i-1]
+		}
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		if unicode.IsLetter(prev) && unicode.IsLetter(next) {
+			continue
+		}
+		b.WriteRune(' ')
+	}
+	return b.String()
 }
 
 func yearFromDate(date string) int {

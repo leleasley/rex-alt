@@ -2119,3 +2119,240 @@ func TestEnrichResolvesMovieAliasKirpiSonic2(t *testing.T) {
 		t.Errorf("details paths = %v, want only /3/movie/675353", detailsPaths)
 	}
 }
+
+// Hyphens joining two letters are deleted, not split: TMDB's stylised
+// "Z-O-M-B-I-E-S" normalises to the same token as a parsed "Zombies", and
+// "X-Men"/"Spider-Man" collapse to a single token on both sides so exact
+// matching still works. A hyphen touching a digit still separates, keeping
+// numeric-prefix ("3754-Family") and codec-tail ("265-EVO") handling.
+func TestNormalizeTitleDeletesLetterHyphens(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Z-O-M-B-I-E-S", "zombies"},
+		{"Z-O-M-B-I-E-S 2", "zombies 2"},
+		{"X-Men", "xmen"},
+		{"Spider-Man", "spiderman"},
+		{"3754-Family", "3754 family"},
+		{"265-EVO", "265 evo"},
+		{"A Wounded Fawn AVC -UnKn0wn", "a wounded fawn avc unkn0wn"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := normalizeTitle(tc.in); got != tc.want {
+				t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TMDB lists the 2018 and 2020 films under hyphenated canonical titles
+// (ids 483980 and 599521, verified live); parsed release names carry the
+// plain form. Hyphen deletion makes each pair an exact normalised match
+// (score 1.0), and the X-Men control pins that hyphenated-on-both-sides
+// titles still exact-match.
+func TestEnrichResolvesHyphenatedTitles(t *testing.T) {
+	cases := []struct {
+		name, title, hitTitle, hitDate string
+		year, hitID                    int
+	}{
+		{"zombies", "Zombies", "Z-O-M-B-I-E-S", "2018-02-16", 2018, 483980},
+		{"zombies sequel", "Zombies 2", "Z-O-M-B-I-E-S 2", "2020-02-14", 2020, 599521},
+		{"x-men control", "X-Men", "X-Men", "2000-07-14", 2000, 78},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if normalizeTitle(tc.title) != normalizeTitle(tc.hitTitle) {
+				t.Fatalf("normalizeTitle(%q) = %q, normalizeTitle(%q) = %q: want an exact normalised match",
+					tc.title, normalizeTitle(tc.title), tc.hitTitle, normalizeTitle(tc.hitTitle))
+			}
+			if got := titleScore(tc.title, tc.hitTitle); got != 1.0 {
+				t.Fatalf("titleScore(%q, %q) = %.4f, want 1.0", tc.title, tc.hitTitle, got)
+			}
+			configBody := fixture(t, "configuration.json")
+			searchBody := fmt.Sprintf(
+				`{"results":[{"id":%d,"title":%q,"release_date":%q,"overview":"Hyphen overview.",`+
+					`"poster_path":"/p.jpg","backdrop_path":"/b.jpg"}]}`,
+				tc.hitID, tc.hitTitle, tc.hitDate)
+			detailsBody := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,"overview":"Hyphen overview."}`,
+				tc.hitID, tc.hitID, tc.hitTitle, tc.hitDate)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.hitID)
+
+			var mu sync.Mutex
+			var detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					writeJSON(w, searchBody)
+				case wantDetails:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					writeJSON(w, detailsBody)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, tc.year, 0, 0, false)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q; want TMDB id %d", tc.title, tc.hitID)
+			}
+			if en.TMDBID != tc.hitID || en.Title != tc.hitTitle || en.Date != tc.hitDate {
+				t.Errorf("Enrich = %+v, want id=%d title=%q date=%q", en, tc.hitID, tc.hitTitle, tc.hitDate)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// A hyphenated parsed title must not attach to an unrelated hit: with only
+// unrelated results the score still rejects and no details are fetched.
+func TestEnrichRejectsHyphenatedNonMatch(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[{"id":9405,"title":"A Completely Different Film","release_date":"2002-05-03"}]}`
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Spider-Man", 2002, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated hyphenated hit")
+	}
+}
+
+// "Stake Land 2" is the release title of the 2016 film TMDB lists as
+// "The Stakelander" (TMDB id 410988, release 2016-10-14, verified live). The
+// alias rewrites the search so the canonical title scores 1.0; the 2010
+// "Stake Land" decoy is year-gated and must never be fetched.
+func TestEnrichResolvesMovieAliasStakelander(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	hit := `{"results":[
+		{"id":410988,"title":"The Stakelander","release_date":"2016-10-14",
+		 "overview":"Stakelander overview.","poster_path":"/p.jpg","backdrop_path":"/b.jpg"},
+		{"id":52015,"title":"Stake Land","release_date":"2010-09-30"}
+	]}`
+	details := `{"id":410988,"imdb_id":"tt0410988","title":"The Stakelander",` +
+		`"release_date":"2016-10-14","overview":"Stakelander overview."}`
+
+	var mu sync.Mutex
+	var queries, detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			q := r.URL.Query().Get("query")
+			mu.Lock()
+			queries = append(queries, q)
+			mu.Unlock()
+			writeJSON(w, hit)
+		case "/3/movie/410988":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, details)
+		default:
+			// Fetching the 2010 decoy's details would be a wrong-id attach.
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Stake Land 2", 2016, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false for Stake Land 2; want TMDB id 410988")
+	}
+	if en.TMDBID != 410988 || en.Title != "The Stakelander" || en.Date != "2016-10-14" {
+		t.Errorf("Enrich = %+v, want id=410988 title The Stakelander date 2016-10-14", en)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(queries) < 1 || queries[0] != "The Stakelander" {
+		t.Errorf("first search query = %q, want the alias target", queries)
+	}
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/410988" {
+		t.Errorf("details paths = %v, want only /3/movie/410988", detailsPaths)
+	}
+}
+
+// Deliberately not fixed: TMDB has no such film for "Campioni" (2023) — it
+// returns "Champions"/"Championext", both wrong. The raw title is left alone
+// and the unrelated-only result set must be rejected without a details fetch.
+func TestEnrichRejectsCampioniUnrelatedResults(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[
+		{"id":9406,"title":"Champions","release_date":"2023-03-10"},
+		{"id":9407,"title":"Championext","release_date":"2023-04-01"}
+	]}`
+	var mu sync.Mutex
+	fetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			fetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Campioni", 2023, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en != (models.Enriched{}) {
+		t.Errorf("Enrich = %+v, %v; want ok=false and zero Enriched", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fetched {
+		t.Error("client fetched details for an unrelated Campioni hit")
+	}
+}
