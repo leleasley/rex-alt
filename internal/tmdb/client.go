@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,12 +111,15 @@ func NewClient(readToken, apiKey string, cache *store.Store, h *http.Client) *Cl
 // be attached to a file. On the TV path, a small documented alias map rewrites
 // well-known daily/wrestling brands before search; all other titles are
 // untouched. Successful results are cached in SQLite under the normalised
-// title|year|isShow|season|episode key.
+// title|year|isShow|season|episode key. When the first search returns no
+// eligible hit, one retry uses a cleaned query built from the parsed title;
+// its hits are still scored against that original title.
 func (c *Client) Enrich(ctx context.Context, title string, year, season, episode int, isShow bool) (models.Enriched, bool, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return models.Enriched{}, false, nil
 	}
+	parsedTitle := title
 	key := cacheKey(title, year, isShow, season, episode)
 	if c.cache != nil {
 		if cached, found := c.cache.TMDB(key); found && cached.TMDBID != 0 {
@@ -147,13 +151,33 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 		if err := c.getJSON(ctx, "/3/search/tv", params, &results); err != nil {
 			return models.Enriched{}, false, err
 		}
-		if len(results.Results) == 0 {
-			return models.Enriched{}, false, nil
+		idx := -1
+		if len(results.Results) > 0 {
+			idx = bestHitIndex(results.Results,
+				func(r searchResult) string { return r.Name },
+				func(r searchResult) string { return r.FirstAirDate },
+				title, year)
 		}
-		idx := bestHitIndex(results.Results,
-			func(r searchResult) string { return r.Name },
-			func(r searchResult) string { return r.FirstAirDate },
-			title, year)
+		if idx < 0 {
+			if fallback := fallbackSearchTitle(parsedTitle); fallback != "" && fallback != title {
+				params.Set("query", fallback)
+				var retry struct {
+					Results []searchResult `json:"results"`
+				}
+				if err := c.getJSON(ctx, "/3/search/tv", params, &retry); err != nil {
+					return models.Enriched{}, false, err
+				}
+				if len(retry.Results) > 0 {
+					idx = bestHitIndex(retry.Results,
+						func(r searchResult) string { return r.Name },
+						func(r searchResult) string { return r.FirstAirDate },
+						parsedTitle, year)
+					if idx >= 0 {
+						results = retry
+					}
+				}
+			}
+		}
 		if idx < 0 {
 			return models.Enriched{}, false, nil
 		}
@@ -202,13 +226,33 @@ func (c *Client) Enrich(ctx context.Context, title string, year, season, episode
 		if err := c.getJSON(ctx, "/3/search/movie", params, &results); err != nil {
 			return models.Enriched{}, false, err
 		}
-		if len(results.Results) == 0 {
-			return models.Enriched{}, false, nil
+		idx := -1
+		if len(results.Results) > 0 {
+			idx = bestHitIndex(results.Results,
+				func(r searchResult) string { return r.Title },
+				func(r searchResult) string { return r.ReleaseDate },
+				title, year)
 		}
-		idx := bestHitIndex(results.Results,
-			func(r searchResult) string { return r.Title },
-			func(r searchResult) string { return r.ReleaseDate },
-			title, year)
+		if idx < 0 {
+			if fallback := fallbackSearchTitle(parsedTitle); fallback != "" && fallback != title {
+				params.Set("query", fallback)
+				var retry struct {
+					Results []searchResult `json:"results"`
+				}
+				if err := c.getJSON(ctx, "/3/search/movie", params, &retry); err != nil {
+					return models.Enriched{}, false, err
+				}
+				if len(retry.Results) > 0 {
+					idx = bestHitIndex(retry.Results,
+						func(r searchResult) string { return r.Title },
+						func(r searchResult) string { return r.ReleaseDate },
+						parsedTitle, year)
+					if idx >= 0 {
+						results = retry
+					}
+				}
+			}
+		}
 		if idx < 0 {
 			return models.Enriched{}, false, nil
 		}
@@ -384,6 +428,50 @@ func yearAllowed(hitDate string, wantYear int) bool {
 
 func cacheKey(title string, year int, isShow bool, season, episode int) string {
 	return fmt.Sprintf("%s|%d|%t|%d|%d", normalizeTitle(title), year, isShow, season, episode)
+}
+
+// fallbackJunkRE strips codec, source and HDR tags from a retry query. It is
+// never applied to the first search, which stays byte-for-byte identical.
+var fallbackJunkRE = regexp.MustCompile(`(?i)\b(?:hdr10plus|hdr10|hdr|dv|remux|mpeg[- ]?2|mpeg|avc|x264|x265|h264|h265|hevc|web[- ]?dl|web|dl|webrip|bluray|blueray|blu|ray|amzn|nf|dsnp|hmax|atvp)\b`)
+
+// fallbackSearchTitle builds a short, clean TMDB query from a parsed release
+// title: upload timestamps/ids at the front and release-group tails are
+// dropped, then at most four title words are kept. Short leading numbers are
+// part of titles ("12 Hour Shift", "101 Dalmatians 2") and are preserved.
+func fallbackSearchTitle(title string) string {
+	cleaned := fallbackJunkRE.ReplaceAllString(
+		strings.NewReplacer(".", " ", "_", " ").Replace(title), " ")
+	out := make([]string, 0, 4)
+	leading := true
+	for _, field := range strings.Fields(cleaned) {
+		// Upload-group suffixes are glued to a hyphen ("-BLURANiUM").
+		if strings.HasPrefix(field, "-") {
+			continue
+		}
+		for _, token := range titleTokens(field) {
+			if leading && isUploadNumber(token) {
+				continue
+			}
+			leading = false
+			out = append(out, token)
+			if len(out) == 4 {
+				return strings.Join(out, " ")
+			}
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func isUploadNumber(token string) bool {
+	if len(token) < 4 {
+		return false
+	}
+	for _, r := range token {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeTitle keeps letters and digits only, lower-cased and separated by

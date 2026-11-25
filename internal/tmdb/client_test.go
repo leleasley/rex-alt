@@ -1137,3 +1137,146 @@ func TestErrorsNeverEchoCredentials(t *testing.T) {
 		}
 	})
 }
+
+func TestFallbackSearchTitle(t *testing.T) {
+	cases := []struct{ parsed, want string }{
+		{"12 Hour Shift MPEG-2 -BLURANiUM", "12 hour shift"},
+		{"28 Years Later HDR10Plus", "28 years later"},
+		{"20251008 105743 London Calling", "london calling"},
+		{"3754-Family", "family"},
+		// Small numbers belong to the title; only long leading numeric prefixes
+		// (timestamps and upload ids) are discarded.
+		{"101 Dalmatians 2 AVC", "101 dalmatians 2"},
+		{"A Christmas Story Christmas X 265-EVO", "a christmas story christmas"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.parsed, func(t *testing.T) {
+			if got := fallbackSearchTitle(tc.parsed); got != tc.want {
+				t.Errorf("fallbackSearchTitle(%q) = %q, want %q", tc.parsed, got, tc.want)
+			}
+		})
+	}
+}
+
+// A noisy parsed title makes TMDB return zero results, so scoring cannot help.
+// The retry query must be cleaned, but the hit is still scored against the
+// original noisy title and the cache key stays the original one.
+func TestEnrichFallsBackToCleanedSearchQuery(t *testing.T) {
+	cases := []struct {
+		name, noisyTitle, wantQuery, wantTitle, wantDate string
+		year, wantID                                     int
+	}{
+		{"mpeg-2 and group suffix", "12 Hour Shift MPEG-2 -BLURANiUM", "12 hour shift", "12 Hour Shift", "2020-10-09", 2020, 771002},
+		{"hdr10plus suffix", "28 Years Later HDR10Plus", "28 years later", "28 Years Later", "2025-06-20", 2025, 853604},
+		{"leading upload timestamp", "20251008 105743 London Calling", "london calling", "London Calling", "2025-02-14", 2025, 774410},
+		{"numeric hyphen prefix", "3754-Family", "family", "Family", "2018-05-18", 2018, 500211},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			hit := fmt.Sprintf(
+				`{"results":[{"id":%d,"title":%q,"release_date":%q,"overview":"Fallback overview.",`+
+					`"poster_path":"/fallback-poster.jpg","backdrop_path":"/fallback-backdrop.jpg"}]}`,
+				tc.wantID, tc.wantTitle, tc.wantDate)
+			details := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,"overview":"Fallback overview."}`,
+				tc.wantID, tc.wantID, tc.wantTitle, tc.wantDate)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.wantID)
+
+			var mu sync.Mutex
+			var queries, detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					q := r.URL.Query().Get("query")
+					mu.Lock()
+					queries = append(queries, q)
+					mu.Unlock()
+					switch q {
+					case tc.noisyTitle:
+						// The first, unchanged query finds nothing.
+						writeJSON(w, `{"results":[]}`)
+					case tc.wantQuery:
+						writeJSON(w, hit)
+					default:
+						t.Errorf("unexpected fallback query %q", q)
+						writeJSON(w, `{"results":[]}`)
+					}
+				default:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					if r.URL.Path == wantDetails {
+						writeJSON(w, details)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.noisyTitle, tc.year, 0, 0, false)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q", tc.noisyTitle)
+			}
+			if en.TMDBID != tc.wantID || en.Title != tc.wantTitle || en.Date != tc.wantDate {
+				t.Errorf("Enrich = %+v, want id=%d title=%q date=%q", en, tc.wantID, tc.wantTitle, tc.wantDate)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(queries) != 2 || queries[0] != tc.noisyTitle || queries[1] != tc.wantQuery {
+				t.Errorf("search queries = %v, want [%q %q]", queries, tc.noisyTitle, tc.wantQuery)
+			}
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// The fallback must not weaken the wrong-id guard: an unrelated hit returned
+// for the cleaned query is still rejected and never fetched in detail.
+func TestEnrichRejectsUnrelatedFallbackHit(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	var mu sync.Mutex
+	detailsFetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			if r.URL.Query().Get("query") == "12 hour shift" {
+				writeJSON(w, `{"results":[{"id":999,"title":"A Completely Different Film","release_date":"2020-01-01"}]}`)
+				return
+			}
+			writeJSON(w, `{"results":[]}`)
+		default:
+			mu.Lock()
+			detailsFetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "12 Hour Shift MPEG-2 -BLURANiUM", 2020, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en.TMDBID != 0 {
+		t.Errorf("Enrich = %+v, %v; want ok=false and no id", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if detailsFetched {
+		t.Error("client fetched details for an unrelated fallback hit")
+	}
+}
