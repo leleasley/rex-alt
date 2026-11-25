@@ -889,3 +889,37 @@ func TestSyncOnceCapLoweringKeepsFullCatalogue(t *testing.T) {
 		t.Error("entry above the cap was not picked up when the cap was lifted")
 	}
 }
+
+// Some release folders name the file after a content hash. The title lives in
+// the parent release name, so enrichment must read that instead of the hash.
+func TestEnrichUsesReleaseNameForHashFilename(t *testing.T) {
+	st := newStore(t)
+	primeTMDB(t, st, "the cycle|2026|false|0|0", 456, "The Cycle")
+	svc := newService(t, testConfig("http://dav.example"), st, "http://dav.example", newREX(t, nil), nil)
+
+	en := svc.enrich(context.Background(), models.Entry{
+		ID:       "movie-hash",
+		Category: "movies",
+		Release:  "The_Cycle_2026_1080p_WEB_H264-NAISU",
+		File:     "375b77f941fe3f914778fade39533f27.mkv",
+	})
+	if en.TMDBID != 456 || en.Title != "The Cycle" {
+		t.Errorf("enriched = %+v, want the release title's id 456", en)
+	}
+}
+
+func TestEnrichUsesFilenameForOrdinaryEntry(t *testing.T) {
+	st := newStore(t)
+	primeTMDB(t, st, "alpha movie|2022|false|0|0", 101, "Alpha Movie")
+	svc := newService(t, testConfig("http://dav.example"), st, "http://dav.example", newREX(t, nil), nil)
+
+	en := svc.enrich(context.Background(), models.Entry{
+		ID:       "movie-normal",
+		Category: "movies",
+		Release:  "unrelated_release_folder",
+		File:     "Alpha.Movie.2022.1080p.BluRay.mkv",
+	})
+	if en.TMDBID != 101 || en.Title != "Alpha Movie" {
+		t.Errorf("enriched = %+v, want the filename's id 101", en)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	stdsync "sync"
 	"time"
@@ -354,12 +355,50 @@ func (s *Service) enrich(ctx context.Context, e models.Entry) models.Enriched {
 	if (s.cfg.TMDBReadToken == "" && s.cfg.TMDBAPIKey == "") || s.mdb == nil {
 		return models.Enriched{}
 	}
-	title, year, season, episode := tmdb.ParseRelease(e.File, e.Category)
+	title, year, season, episode := tmdb.ParseRelease(titleSource(e), e.Category)
 	en, ok, err := s.mdb.Enrich(ctx, title, year, season, episode, e.Category == "tv")
 	if err != nil || !ok {
 		return models.Enriched{}
 	}
 	return en
+}
+
+// titleSource picks the string used to derive a TMDB title. Some releases name
+// the file after a content hash ("375b77f9....mkv") or a bare numeric id; the
+// real title then lives in the release folder above it. Only the title source
+// changes — ids, paths, probing and pushing still use the original entry.
+func titleSource(e models.Entry) string {
+	base := path.Base(strings.ReplaceAll(e.File, "\\", "/"))
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	if isHashLike(stem) || isDigitsAndUnderscores(stem) {
+		return e.Release
+	}
+	return e.File
+}
+
+func isHashLike(stem string) bool {
+	if len(stem) < 16 {
+		return false
+	}
+	for _, r := range stem {
+		hexDigit := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+		if !hexDigit {
+			return false
+		}
+	}
+	return true
+}
+
+func isDigitsAndUnderscores(stem string) bool {
+	if stem == "" {
+		return false
+	}
+	for _, r := range stem {
+		if r != '_' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // probeMissing validates and caches fresh probes with at most ProbeWorkers

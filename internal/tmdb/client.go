@@ -42,6 +42,10 @@ const (
 	// while the cap stays below the 1.0 of an exact normalised match.
 	containedTitleBase = 0.6
 	containedTitleSpan = 0.35
+	// A one-word title with a year in hand is accepted through containment at
+	// this fixed score: below exact (1.0), above the Dice threshold. Without a
+	// year the two-token containment rule still applies.
+	singleTokenContained = 0.75
 )
 
 // scoringApostrophes is used only by the match scorer: TMDB writes "Patch's"
@@ -337,6 +341,9 @@ func bestHitIndex[T any](results []T, titleOf, dateOf func(T) string, wantTitle 
 		if contained := containmentScore(wantTitle, hitTitle); contained > score {
 			score = contained
 		}
+		if single := singleTokenContainedScore(wantTitle, hitTitle, wantYear); single > score {
+			score = single
+		}
 		isExact := normalizeTitle(hitTitle) == exact
 		if score > bestScore || (score == bestScore && isExact && !bestExact) {
 			best, bestScore, bestExact = i, score, isExact
@@ -398,6 +405,28 @@ func containmentScore(want, got string) float64 {
 		counts[token]--
 	}
 	return containedTitleBase + containedTitleSpan*float64(len(gotTokens))/float64(len(wantTokens))
+}
+
+// singleTokenContainedScore admits a one-word TMDB title only when a year was
+// parsed and that word occurs in the parsed query. A parsed release such as
+// "20251028 160401 Relay" otherwise scores 0.5 by Dice against "Relay" and is
+// rejected, although the year gate already proves the hit is the right film.
+// With wantYear == 0 this returns 0, keeping the two-token containment rule
+// that protects decoys for no-year daily shows.
+func singleTokenContainedScore(want, got string, wantYear int) float64 {
+	if wantYear <= 0 {
+		return 0
+	}
+	gotTokens := titleTokens(got)
+	if len(gotTokens) != 1 {
+		return 0
+	}
+	for _, token := range titleTokens(want) {
+		if token == gotTokens[0] {
+			return singleTokenContained
+		}
+	}
+	return 0
 }
 
 // titleTokens is the scoring-only normalisation: apostrophes are deleted

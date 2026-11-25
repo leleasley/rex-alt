@@ -1280,3 +1280,143 @@ func TestEnrichRejectsUnrelatedFallbackHit(t *testing.T) {
 		t.Error("client fetched details for an unrelated fallback hit")
 	}
 }
+
+// A one-word TMDB title cannot clear the Dice threshold against a parsed name
+// carrying an upload timestamp. With a year in hand, containment may accept it
+// once the word is present in the query; without a year the old two-token rule
+// must still reject it (the WWE/Raw decoys depend on that).
+func TestSingleTokenContainedScore(t *testing.T) {
+	cases := []struct {
+		want, got string
+		year      int
+		score     float64
+	}{
+		{"20251028 160401 Relay", "Relay", 2025, 0.75},
+		{"20251028 160401 Relay", "Relay", 0, 0},
+		{"20251028 160401 Relay", "Unrelated", 2025, 0},
+		{"20251028 160401 Relay", "Relay Station", 2025, 0},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%s/%d", tc.want, tc.got, tc.year), func(t *testing.T) {
+			if got := singleTokenContainedScore(tc.want, tc.got, tc.year); got != tc.score {
+				t.Errorf("singleTokenContainedScore = %.2f, want %.2f", got, tc.score)
+			}
+		})
+	}
+}
+
+func TestEnrichAcceptsSingleTokenHitWithYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[
+		{"id":7001,"title":"Relay Station","release_date":"2025-04-01"},
+		{"id":7002,"title":"Relayed","release_date":"2025-05-01"},
+		{"id":1088166,"title":"Relay","release_date":"2025-08-22"}
+	]}`
+	details := `{"id":1088166,"imdb_id":"tt1088166","title":"Relay","release_date":"2025-08-22","overview":"A relay film."}`
+
+	var mu sync.Mutex
+	var detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		case "/3/movie/1088166":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, details)
+		default:
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "20251028 160401 Relay", 2025, 0, 0, false)
+	if err != nil || !ok {
+		t.Fatalf("Enrich = %+v, %v, %v; want the Relay id", en, ok, err)
+	}
+	if en.TMDBID != 1088166 || en.Title != "Relay" {
+		t.Errorf("Enrich = %+v, want id 1088166 title Relay", en)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/1088166" {
+		t.Errorf("details paths = %v, want only /3/movie/1088166", detailsPaths)
+	}
+}
+
+func TestEnrichRejectsSingleTokenHitWithMismatchedYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[{"id":1088166,"title":"Relay","release_date":"2015-01-01"}]}`
+	var mu sync.Mutex
+	detailsFetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			detailsFetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "20251028 160401 Relay", 2025, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en.TMDBID != 0 {
+		t.Errorf("Enrich = %+v, %v; want ok=false for the wrong year", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if detailsFetched {
+		t.Error("client fetched details for a wrong-year single-token hit")
+	}
+}
+
+func TestEnrichRejectsSingleTokenHitWithoutYear(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[{"id":1088166,"title":"Relay","release_date":"2025-08-22"}]}`
+	var mu sync.Mutex
+	detailsFetched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		default:
+			mu.Lock()
+			detailsFetched = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "20251028 160401 Relay", 0, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if ok || en.TMDBID != 0 {
+		t.Errorf("Enrich = %+v, %v; want ok=false with no parsed year", en, ok)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if detailsFetched {
+		t.Error("client fetched details for a single-token hit without a year")
+	}
+}
