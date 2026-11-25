@@ -89,7 +89,7 @@ Use the provided image-only `docker-compose.yml`, or copy just this stanza into 
 ```yaml
 services:
   rex-alt:
-    image: ghcr.io/leleasley/rex-alt:v0.1.15
+    image: ghcr.io/leleasley/rex-alt:v0.1.16
     container_name: rex-alt
     restart: unless-stopped
     env_file: .env
@@ -126,7 +126,7 @@ docker compose logs -f rex-alt    # Ctrl-C to stop following
 
 ```bash
 curl -sS http://<host>:9982/api/v1/health
-# {"status":"ok","version":"v0.1.15"}
+# {"status":"ok","version":"v0.1.16"}
 
 curl -sS -u "$REX_SOURCE_USER:$REX_SOURCE_PASSWORD" \
   "$REX_URL/rex/sources/rex-alt"
