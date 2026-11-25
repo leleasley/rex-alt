@@ -49,6 +49,7 @@ var videoExtensions = map[string]bool{
 var junkTokens = map[string]bool{
 	"4k": true, "uhd": true, "hdr": true, "hdr10": true, "10bit": true, "8bit": true,
 	"bluray": true, "blueray": true, "blu-ray": true, "blu": true, "ray": true,
+	"3d": true, "3-d": true,
 	"web": true, "webdl": true,
 	"webrip": true, "web-dl": true, "hdtv": true, "dvdrip": true, "bdrip": true,
 	"remux": true, "x264": true, "x265": true, "h264": true, "h265": true,
@@ -86,8 +87,9 @@ var wweFirstAirYears = map[string]int{
 // stripped too. Without a marker, a trailing YYYY.MM.DD air date ends the
 // show name the same way because the date and all release tags after it are
 // episode-specific; it is never reported as the show's first-air year.
-// A season/episode is reported only for a tv category; the marker is stripped
-// from movies as well so it cannot leak into their title.
+// A season/episode is reported for tv entries and for movies-category files
+// that carry an SxxExx marker (misplaced TV episodes); the marker ends the
+// title in both cases because everything after it is episode-specific.
 func ParseRelease(name, category string) (title string, year int, season, episode int) {
 	base := path.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
 	if ext := strings.ToLower(path.Ext(base)); videoExtensions[ext] {
@@ -118,9 +120,16 @@ func ParseRelease(name, category string) (title string, year int, season, episod
 			}
 		}
 	} else if loc := seasonEpisodeRE.FindStringSubmatchIndex(base); loc != nil {
-		// Movies never report a season/episode, but the marker must still be
-		// removed so it cannot leak into the title.
-		base = base[:loc[0]] + " " + base[loc[1]:]
+		// A misplaced TV episode in the movies category (live catalogue:
+		// Unforgotten.S06E04, Bridgerton.S03E05, the Program miniseries).
+		// Report its season/episode and stop the title at the marker, just
+		// like the TV path, so sync can route it through the TV
+		// enrich+episode path. Genuine movies never carry an SxxExx marker;
+		// the TMDB year gate and title score still reject a wrong-path hit.
+		s, _ := strconv.Atoi(base[loc[2]:loc[3]])
+		e, _ := strconv.Atoi(base[loc[4]:loc[5]])
+		season, episode = s, e
+		base = base[:loc[0]]
 	}
 
 	// The last four-digit year is the release year: titles such as
@@ -209,12 +218,17 @@ func cleanTitleFragment(s string) string {
 
 	words := strings.Fields(s)
 	kept := make([]string, 0, len(words))
-	for _, word := range words {
-		if !isJunkToken(word) {
-			kept = append(kept, word)
+	for i, word := range words {
+		var prev string
+		if i > 0 {
+			prev = words[i-1]
 		}
+		if dropJunkToken(word, prev) {
+			continue
+		}
+		kept = append(kept, word)
 	}
-	for len(kept) > 0 && isJunkToken(kept[len(kept)-1]) {
+	for len(kept) > 1 && dropJunkToken(kept[len(kept)-1], kept[len(kept)-2]) {
 		kept = kept[:len(kept)-1]
 	}
 	return strings.Join(kept, " ")
@@ -257,4 +271,19 @@ func isJunkToken(word string) bool {
 		return junkTokens[head] || resolutionRE.MatchString(head)
 	}
 	return false
+}
+
+// dropJunkToken reports whether a title word is release junk to remove. "ray"
+// is junk only as the second half of a Blu-ray tag (Blu-ray/BluRay/Blu Ray):
+// a real title word such as the "Ray" in "Raymond and Ray" is kept. "blu" is
+// always junk. prev is the preceding word in the same sequence (raw words in
+// the main loop, kept words in the trailing strip), case-insensitively.
+func dropJunkToken(word, prev string) bool {
+	if !isJunkToken(word) {
+		return false
+	}
+	if strings.ToLower(strings.Trim(word, "-[](){}.,'\"")) == "ray" {
+		return strings.ToLower(strings.Trim(prev, "-[](){}.,'\"")) == "blu"
+	}
+	return true
 }

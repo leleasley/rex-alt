@@ -249,7 +249,7 @@ func (s *Service) SyncOnce(ctx context.Context) (Stats, error) {
 		}
 		var item rex.Item
 		var ok bool
-		if e.Category == "tv" {
+		if isShowEntry(e.Category, e.Season, e.Episode) {
 			item, ok = rex.EpisodeItem(e, enriched[i], results[i].JSON, digest, s.cfg.RexSendTMDBIDs)
 		} else {
 			item, ok = rex.MovieItem(e, enriched[i], results[i].JSON, digest, s.cfg.RexSendTMDBIDs)
@@ -356,11 +356,20 @@ func (s *Service) enrich(ctx context.Context, e models.Entry) models.Enriched {
 		return models.Enriched{}
 	}
 	title, year, season, episode := tmdb.ParseRelease(titleSource(e), e.Category)
-	en, ok, err := s.mdb.Enrich(ctx, title, year, season, episode, e.Category == "tv")
+	en, ok, err := s.mdb.Enrich(ctx, title, year, season, episode, isShowEntry(e.Category, season, episode))
 	if err != nil || !ok {
 		return models.Enriched{}
 	}
 	return en
+}
+
+// isShowEntry reports whether an entry is routed through the TV enrich+episode
+// path: every tv-category entry, plus movies-category files that carry an
+// SxxExx marker (misplaced TV episodes, e.g. Unforgotten.S06E04 filed under
+// movies). Callers pass the season/episode the parser filled — from the title
+// source in enrich, from the entry's pre-parsed file name on the push path.
+func isShowEntry(category string, season, episode int) bool {
+	return category == "tv" || (season > 0 && episode > 0)
 }
 
 // titleSource picks the string used to derive a TMDB title. Some releases name

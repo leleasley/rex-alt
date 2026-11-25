@@ -680,7 +680,9 @@ func TestTitleScoreNoisyTitlesClearThreshold(t *testing.T) {
 		lo, hi          float64
 	}{
 		{"exact normalized match", "A Wounded Fawn", "A Wounded Fawn", 1, 1},
-		{"roman numeral and possessive", "101 Dalmatians 2 Patchs London Adventure AVC", "101 Dalmatians II: Patch's London Adventure", 0.75, 0.80},
+		// Numeral-mapped: "2" and "II" are the same token after
+		// normalizeTitle, so 12 of 13 tokens are shared.
+		{"roman numeral and possessive", "101 Dalmatians 2 Patchs London Adventure AVC", "101 Dalmatians II: Patch's London Adventure", 0.92, 0.93},
 		{"codec tail", "A Christmas Story Christmas X 265-EVO", "A Christmas Story Christmas", 0.70, 0.75},
 		{"upload group suffix", "A Wounded Fawn AVC -UnKn0wn", "A Wounded Fawn", 0.74, 0.76},
 		{"unrelated", "Swallowed", "A Completely Different Film", 0, 0},
@@ -1800,5 +1802,320 @@ func TestEnrichRejectsUnrelatedHitAcrossAllPrefixes(t *testing.T) {
 	}
 	if detailsFetched {
 		t.Error("client fetched details for an unrelated prefix hit")
+	}
+}
+
+// Diacritic folding must make a release name and its TMDB listing compare
+// equal: "Aladdín" parses with an accent while TMDB lists "Aladdin", and the
+// file parses as "Finding Ohana" while TMDB lists "Finding ʻOhana".
+func TestNormalizeTitleFoldsDiacriticsAndNumerals(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Aladdín", "aladdin"},
+		{"Finding ʻOhana", "finding ohana"},
+		{"Amélie", "amelie"},
+		{"Léon", "leon"},
+		{"Stake Land II", "stake land 2"},
+		{"Rocky IV", "rocky 4"},
+		{"101 Dalmatians 2", "101 dalmatians 2"},
+		// Controls: single-character numerals are real words/titles and the
+		// WWE alias keys are ASCII, so none of these may change.
+		{"V for Vendetta", "v for vendetta"},
+		{"X", "x"},
+		{"I", "i"},
+		{"WWE Monday Night RAW", "wwe monday night raw"},
+		{"WWE Friday Night SmackDown", "wwe friday night smackdown"},
+		{"WWE NXT", "wwe nxt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := normalizeTitle(tc.in); got != tc.want {
+				t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// A numeral-mapped title must be an exact normalised match for its TMDB
+// listing (score 1.0), not a near miss.
+func TestTitleScoreRomanNumeralIsExact(t *testing.T) {
+	if got := titleScore("Stake Land 2", "Stake Land II"); got != 1.0 {
+		t.Errorf("titleScore = %.4f, want 1.0 for a numeral-mapped exact match", got)
+	}
+}
+
+// Control for the 3D junk token: if TMDB genuinely carries "3D" in the title
+// while the parser stripped it, the Dice overlap still clears the threshold.
+func TestTitleScoreGenuine3DTitleStillMatches(t *testing.T) {
+	got := titleScore("Onward", "Onward 3D")
+	if got < minTitleScore {
+		t.Errorf("titleScore = %.4f, want >= %.2f so a genuine 3D title still matches", got, minTitleScore)
+	}
+	if want := 2.0 / 3.0; math.Abs(got-want) > 1e-9 {
+		t.Errorf("titleScore = %.4f, want %.4f", got, want)
+	}
+}
+
+// Festival-vs-wide drift: when normalised titles match exactly, |year diff|
+// of 2 is accepted (The Upside filed 2017, TMDB 2019-01-10; Wake Wood filed
+// 2009, TMDB 2011-03-25). Anything else keeps the ±1 gate: exact+diff-5 and
+// non-exact+diff-2 are still rejected.
+func TestBestHitIndexExactMatchYearToleranceTwo(t *testing.T) {
+	type hit struct{ title, date string }
+	titleOf := func(h hit) string { return h.title }
+	dateOf := func(h hit) string { return h.date }
+
+	cases := []struct {
+		name    string
+		want    string
+		year    int
+		results []hit
+		index   int
+	}{
+		{
+			name:    "exact plus two accepted",
+			want:    "The Upside",
+			year:    2017,
+			results: []hit{{title: "The Upside", date: "2019-01-10"}},
+			index:   0,
+		},
+		{
+			name:    "exact minus two accepted",
+			want:    "The Upside",
+			year:    2021,
+			results: []hit{{title: "The Upside", date: "2019-01-10"}},
+			index:   0,
+		},
+		{
+			name:    "exact plus five rejected",
+			want:    "The Upside",
+			year:    2014,
+			results: []hit{{title: "The Upside", date: "2019-01-10"}},
+			index:   -1,
+		},
+		{
+			name:    "tied exact matches prefer the nearer year",
+			want:    "Almost Friends",
+			year:    2016,
+			results: []hit{{title: "Almost Friends", date: "2014-01-01"}, {title: "Almost Friends", date: "2017-11-17"}},
+			index:   1,
+		},
+		{
+			name:    "non-exact plus two rejected",
+			want:    "Train Dreams H 265-XEBEC",
+			year:    2023,
+			results: []hit{{title: "Train Dreams", date: "2025-11-21"}},
+			index:   -1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bestHitIndex(tc.results, titleOf, dateOf, tc.want, tc.year); got != tc.index {
+				t.Errorf("bestHitIndex = %d, want %d", got, tc.index)
+			}
+		})
+	}
+}
+
+// End-to-end diacritic cases over HTTP fixtures: the parsed release name must
+// resolve to the TMDB listing despite the accent/okina difference.
+func TestEnrichResolvesDiacriticTitles(t *testing.T) {
+	cases := []struct {
+		name      string
+		title     string
+		year      int
+		hitID     int
+		hitTitle  string
+		hitDate   string
+		wantQuery string
+	}{
+		{
+			name:      "accented release against plain TMDB title",
+			title:     "Aladdín",
+			year:      2019,
+			hitID:     420817,
+			hitTitle:  "Aladdin",
+			hitDate:   "2019-05-22",
+			wantQuery: "Aladdín",
+		},
+		{
+			name:      "plain release against okina TMDB title",
+			title:     "Finding Ohana",
+			year:      2021,
+			hitID:     642378,
+			hitTitle:  "Finding ʻOhana",
+			hitDate:   "2021-01-29",
+			wantQuery: "Finding Ohana",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configBody := fixture(t, "configuration.json")
+			searchBody := fmt.Sprintf(
+				`{"results":[{"id":%d,"title":%q,"release_date":%q,"overview":"Diacritic overview.",`+
+					`"poster_path":"/p.jpg","backdrop_path":"/b.jpg"}]}`,
+				tc.hitID, tc.hitTitle, tc.hitDate)
+			detailsBody := fmt.Sprintf(
+				`{"id":%d,"imdb_id":"tt%07d","title":%q,"release_date":%q,"overview":"Diacritic overview."}`,
+				tc.hitID, tc.hitID, tc.hitTitle, tc.hitDate)
+			wantDetails := fmt.Sprintf("/3/movie/%d", tc.hitID)
+
+			var mu sync.Mutex
+			var queries, detailsPaths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/3/configuration":
+					writeJSON(w, configBody)
+				case "/3/search/movie":
+					mu.Lock()
+					queries = append(queries, r.URL.Query().Get("query"))
+					mu.Unlock()
+					writeJSON(w, searchBody)
+				default:
+					mu.Lock()
+					detailsPaths = append(detailsPaths, r.URL.Path)
+					mu.Unlock()
+					if r.URL.Path == wantDetails {
+						writeJSON(w, detailsBody)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+			en, ok, err := c.Enrich(context.Background(), tc.title, tc.year, 0, 0, false)
+			if err != nil {
+				t.Fatalf("Enrich: %v", err)
+			}
+			if !ok {
+				t.Fatalf("Enrich returned ok=false for %q; want TMDB id %d", tc.title, tc.hitID)
+			}
+			if en.TMDBID != tc.hitID || en.Title != tc.hitTitle || en.Date != tc.hitDate {
+				t.Errorf("Enrich = %+v, want id=%d title=%q date=%q", en, tc.hitID, tc.hitTitle, tc.hitDate)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(queries) < 1 || queries[0] != tc.wantQuery {
+				t.Errorf("first search query = %q, want %q (the parsed title, unchanged)", queries, tc.wantQuery)
+			}
+			if len(detailsPaths) != 1 || detailsPaths[0] != wantDetails {
+				t.Errorf("details paths = %v, want only %s", detailsPaths, wantDetails)
+			}
+		})
+	}
+}
+
+// The numeral map makes "Stake Land 2" an exact normalised match for a
+// II-titled entry, outranking the older "Stake Land" decoy (which the year
+// gate rejects). Fixture note: live TMDB lists the 2016 sequel under the
+// canonical title "The Stakelander" (id 410988, matched via its "Stake Land
+// II" alternative title); the mapping covers II-titled entries exactly.
+func TestEnrichResolvesRomanNumeralSequel(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	searchBody := `{"results":[
+		{"id":52015,"title":"Stake Land","release_date":"2010-09-30"},
+		{"id":410988,"title":"Stake Land II","release_date":"2016-10-14"}
+	]}`
+	detailsBody := `{"id":410988,"imdb_id":"tt0410988","title":"Stake Land II","release_date":"2016-10-14","overview":"Sequel overview."}`
+
+	var mu sync.Mutex
+	var detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			writeJSON(w, searchBody)
+		case "/3/movie/410988":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, detailsBody)
+		default:
+			// Fetching the 2010 decoy's details would be a wrong-id attach.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Stake Land 2", 2016, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false for Stake Land 2; want TMDB id 410988")
+	}
+	if en.TMDBID != 410988 {
+		t.Errorf("TMDBID = %d, want 410988 (the 2010 decoy must not win)", en.TMDBID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/410988" {
+		t.Errorf("details paths = %v, want only /3/movie/410988", detailsPaths)
+	}
+}
+
+// "Kirpi Sonic 2" is the Turkish release title of the 2022 film
+// "Sonic the Hedgehog 2" (TMDB id 675353, Turkish title "Kirpi Sonic 2",
+// verified live). The alias rewrites the search so the exact title scores 1.0.
+func TestEnrichResolvesMovieAliasKirpiSonic2(t *testing.T) {
+	configBody := fixture(t, "configuration.json")
+	hit := `{"results":[{"id":675353,"title":"Sonic the Hedgehog 2","release_date":"2022-03-30",` +
+		`"overview":"Sonic overview.","poster_path":"/p.jpg","backdrop_path":"/b.jpg"}]}`
+	details := `{"id":675353,"imdb_id":"tt12412888","title":"Sonic the Hedgehog 2",` +
+		`"release_date":"2022-03-30","overview":"Sonic overview."}`
+
+	var mu sync.Mutex
+	var queries, detailsPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/configuration":
+			writeJSON(w, configBody)
+		case "/3/search/movie":
+			q := r.URL.Query().Get("query")
+			mu.Lock()
+			queries = append(queries, q)
+			mu.Unlock()
+			if q == "Sonic the Hedgehog 2" {
+				writeJSON(w, hit)
+				return
+			}
+			writeJSON(w, `{"results":[]}`)
+		case "/3/movie/675353":
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			writeJSON(w, details)
+		default:
+			mu.Lock()
+			detailsPaths = append(detailsPaths, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, testToken, "", newTestStore(t))
+	en, ok, err := c.Enrich(context.Background(), "Kirpi Sonic 2", 2022, 0, 0, false)
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !ok {
+		t.Fatal("Enrich returned ok=false for Kirpi Sonic 2; want TMDB id 675353")
+	}
+	if en.TMDBID != 675353 || en.Title != "Sonic the Hedgehog 2" || en.Date != "2022-03-30" {
+		t.Errorf("Enrich = %+v, want id=675353 title Sonic the Hedgehog 2 date 2022-03-30", en)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(queries) < 1 || queries[0] != "Sonic the Hedgehog 2" {
+		t.Errorf("first search query = %q, want the alias target", queries)
+	}
+	if len(detailsPaths) != 1 || detailsPaths[0] != "/3/movie/675353" {
+		t.Errorf("details paths = %v, want only /3/movie/675353", detailsPaths)
 	}
 }

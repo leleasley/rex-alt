@@ -123,12 +123,96 @@ func TestParseReleaseEpisode(t *testing.T) {
 }
 
 func TestParseReleaseDoesNotReadSeasonFromMovieName(t *testing.T) {
-	title, year, season, ep := ParseRelease("Swallowed.2022.1080p.S01E02.BluRay-DST", "movies")
-	if title != "Swallowed" {
-		t.Errorf("title = %q, want Swallowed", title)
+	// Misplaced TV episodes sit in the movies category (live: Unforgotten.S06E04
+	// filed under a Jay Kelly release, Bridgerton.S03E05 under Marry Me, the
+	// Program miniseries S01E01-03). The movies path reports their
+	// season/episode and stops the title at the marker so sync can route them
+	// through the TV enrich+episode path; the TMDB year gate and title score
+	// still reject a wrong-path hit for a genuine movie.
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+		wantS     int
+		wantEp    int
+	}{
+		{"Swallowed.2022.1080p.S01E02.BluRay-DST", "Swallowed", 2022, 1, 2},
+		{"Unforgotten.S06E04.720p.AMZN.WEB-DL.DDP5.1.H.264-RAWR", "Unforgotten", 0, 6, 4},
+		{"Bridgerton.2024.S03E05.Tik.Tak.1080p.NF.WEB-DL.H.264.DUAL.DDP.51.@TSRG", "Bridgerton", 2024, 3, 5},
 	}
-	if year != 2022 || season != 0 || ep != 0 {
-		t.Errorf("got year=%d season=%d episode=%d, want 2022/0/0", year, season, ep)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != tc.wantYear {
+				t.Errorf("year = %d, want %d", year, tc.wantYear)
+			}
+			if season != tc.wantS || ep != tc.wantEp {
+				t.Errorf("season/episode = %d/%d, want %d/%d", season, ep, tc.wantS, tc.wantEp)
+			}
+		})
+	}
+}
+
+// "ray" is junk only as the second half of a Blu-ray tag. A real title word
+// keeps its Ray ("Raymond and Ray"), while Blu-ray/BluRay/Blu Ray tags are
+// fully stripped with or without a year cut to protect them.
+func TestParseReleaseKeepsRayUnlessAfterBlu(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+	}{
+		{"Raymond.and.Ray.2022.1080p.ATVP.WEB-DL.DDP5.1.Atmos.H.264-FLUX", "Raymond and Ray", 2022},
+		{"Ray.2022.1080p.WEB-DL.x264-GROUP", "Ray", 2022},
+		{"Movie.Title.2022.1080p.Blu-ray.x264-GROUP", "Movie Title", 2022},
+		{"Movie.Title.2022.1080p.BluRay.x264-GROUP", "Movie Title", 2022},
+		{"Movie.Title.2022.Blu.Ray.1080p.x264-GROUP", "Movie Title", 2022},
+		// No year: the whole-base filter must apply the same context rule.
+		{"Movie.Title.Blu.Ray.WEBDL", "Movie Title", 0},
+		{"Raymond.and.Ray.WEBDL", "Raymond and Ray", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != tc.wantYear {
+				t.Errorf("year = %d, want %d", year, tc.wantYear)
+			}
+			if season != 0 || ep != 0 {
+				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			}
+		})
+	}
+}
+
+// Bare 3D/3-D tags never belong to a parsed title (live: Onward.3D.2020).
+func TestParseReleaseStrips3D(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantTitle string
+		wantYear  int
+	}{
+		{"Onward.3D.2020.1080p.BluRay.x264-JustWatch", "Onward", 2020},
+		{"Movie.Title.3-D.2020.1080p.WEB-DL.x264-GROUP", "Movie Title", 2020},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, year, season, ep := ParseRelease(tc.name, "movies")
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			if year != tc.wantYear {
+				t.Errorf("year = %d, want %d", year, tc.wantYear)
+			}
+			if season != 0 || ep != 0 {
+				t.Errorf("season/episode = %d/%d, want 0/0", season, ep)
+			}
+		})
 	}
 }
 

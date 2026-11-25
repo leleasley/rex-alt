@@ -923,3 +923,41 @@ func TestEnrichUsesFilenameForOrdinaryEntry(t *testing.T) {
 		t.Errorf("enriched = %+v, want the filename's id 101", en)
 	}
 }
+
+// Misplaced TV episodes in the movies category (live catalogue: Unforgotten
+// S06E04 filed under a Jay Kelly release, Bridgerton S03E05 under Marry Me,
+// the Program miniseries S01E01-03) must be enriched as shows and pushed as
+// episode items, not movie items.
+func TestSyncOnceRoutesMisplacedMovieEpisodeToTVPath(t *testing.T) {
+	misplaced := "/webdav/movies/Unforgotten.S06E04/Unforgotten.S06E04.720p.AMZN.WEB-DL.DDP5.1.H.264-RAWR.mkv"
+	dav := &davState{files: map[string][]string{}, sample: []byte{1, 2, 3, 4}}
+	dav.setFiles("movies", misplaced)
+	dav.setFiles("tv")
+	server := newDAV(t, dav)
+	st := newStore(t)
+	// The parser yields title "Unforgotten", year 0, S06E04, routed as a show.
+	primeTMDB(t, st, "unforgotten|0|true|6|4", 555, "Unforgotten")
+	rx := newREX(t, nil)
+	svc := newService(t, testConfig(server.URL), st, server.URL, rx, goodProbe)
+
+	stats, err := svc.SyncOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+	if stats.Pushed != 1 {
+		t.Fatalf("stats = %+v, want Pushed=1", stats)
+	}
+	_, _, pushes, _ := rx.snapshot()
+	for _, feed := range pushes {
+		for _, item := range feed.Items {
+			if item.Path == strings.TrimPrefix(misplaced, "/webdav/") {
+				if item.Kind != "episode" || item.Season == nil || *item.Season != 6 ||
+					item.Episode == nil || *item.Episode != 4 {
+					t.Errorf("misplaced episode item = %+v, want kind=episode S06E04", item)
+				}
+				return
+			}
+		}
+	}
+	t.Error("misplaced episode item was not pushed")
+}
